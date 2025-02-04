@@ -1,98 +1,153 @@
+/*
+ * SPDX-License-Identifier: LGPL-2.1-or-later
+ * SPDX-FileCopyrightText: Copyright 2021-2023 Fcitx5 for Android Contributors
+ */
 package org.fcitx.fcitx5.android.ui.main
 
 import android.os.Bundle
-import android.widget.Toast
+import android.os.Debug
+import androidx.activity.result.ActivityResultLauncher
+import androidx.activity.result.contract.ActivityResultContracts.CreateDocument
 import androidx.appcompat.app.AlertDialog
-import androidx.fragment.app.activityViewModels
 import androidx.lifecycle.lifecycleScope
-import androidx.preference.Preference
-import androidx.preference.SwitchPreference
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import org.fcitx.fcitx5.android.R
-import org.fcitx.fcitx5.android.data.DataManager
+import org.fcitx.fcitx5.android.core.data.DataManager
+import org.fcitx.fcitx5.android.daemon.FcitxDaemon
 import org.fcitx.fcitx5.android.data.clipboard.ClipboardManager
 import org.fcitx.fcitx5.android.data.prefs.AppPrefs
 import org.fcitx.fcitx5.android.ui.common.PaddingPreferenceFragment
+import org.fcitx.fcitx5.android.ui.main.modified.MySwitchPreference
 import org.fcitx.fcitx5.android.utils.AppUtil
+import org.fcitx.fcitx5.android.utils.addPreference
+import org.fcitx.fcitx5.android.utils.iso8601UTCDateTime
+import org.fcitx.fcitx5.android.utils.startActivity
+import org.fcitx.fcitx5.android.utils.toast
+import java.io.File
 
 class DeveloperFragment : PaddingPreferenceFragment() {
 
-    private val viewModel: MainViewModel by activityViewModels()
+    private lateinit var hprofFile: File
+    private lateinit var launcher: ActivityResultLauncher<String>
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        launcher = registerForActivityResult(CreateDocument("application/octet-stream")) { uri ->
+            if (uri == null) {
+                hprofFile.delete()
+                return@registerForActivityResult
+            }
+            val ctx = requireContext()
+            lifecycleScope.launch(NonCancellable + Dispatchers.IO) {
+                runCatching {
+                    ctx.contentResolver.openOutputStream(uri)!!.use { o ->
+                        hprofFile.inputStream().use { i -> i.copyTo(o) }
+                    }
+                }.let { ctx.toast(it) }
+                hprofFile.delete()
+            }
+        }
+    }
 
     override fun onCreatePreferences(savedInstanceState: Bundle?, rootKey: String?) {
-        val context = preferenceManager.context
-        val screen = preferenceManager.createPreferenceScreen(context)
-        screen.addPreference(Preference(context).apply {
-            setTitle(R.string.real_time_logs)
-            isIconSpaceReserved = false
-            isSingleLineTitle = false
-            setOnPreferenceClickListener {
-                AppUtil.launchLog(context)
-                true
+        preferenceScreen = preferenceManager.createPreferenceScreen(requireContext()).apply {
+            addPreference(R.string.real_time_logs) {
+                startActivity<LogActivity>()
             }
-        })
-        screen.addPreference(SwitchPreference(context).apply {
-            key = AppPrefs.getInstance().internal.verboseLog.key
-            setTitle(R.string.verbose_log)
-            setSummary(R.string.verbose_log_summary)
-            setDefaultValue(false)
-            isIconSpaceReserved = false
-            isSingleLineTitle = false
-        })
-        screen.addPreference(SwitchPreference(context).apply {
-            key = AppPrefs.getInstance().internal.editorInfoInspector.key
-            setTitle(R.string.editor_info_inspector)
-            setDefaultValue(false)
-            isIconSpaceReserved = false
-            isSingleLineTitle = false
-        })
-
-        screen.addPreference(Preference(context).apply {
-            setTitle(R.string.delete_and_sync_data)
-            isIconSpaceReserved = false
-            isSingleLineTitle = false
-            setOnPreferenceClickListener {
+            addPreference(MySwitchPreference(context).apply {
+                key = AppPrefs.getInstance().internal.verboseLog.key
+                setTitle(R.string.verbose_log)
+                setSummary(R.string.verbose_log_summary)
+                setDefaultValue(false)
+                isIconSpaceReserved = false
+                isSingleLineTitle = false
+                setOnPreferenceChangeListener { _, _ ->
+                    AlertDialog.Builder(context)
+                        .setTitle(R.string.verbose_log)
+                        .setMessage(R.string.restart_to_apply_settings)
+                        .setNegativeButton(android.R.string.cancel, null)
+                        .setPositiveButton(android.R.string.ok) { _, _ ->
+                            lifecycleScope.launch {
+                                withContext(NonCancellable + Dispatchers.IO) {
+                                    FcitxDaemon.stopFcitx()
+                                }
+                                lifecycleScope.launch(NonCancellable + Dispatchers.Main) {
+                                    delay(400L)
+                                    AppUtil.exit()
+                                }
+                                AppUtil.showRestartNotification(context)
+                            }
+                        }
+                        .show()
+                    true
+                }
+            })
+            addPreference(MySwitchPreference(context).apply {
+                key = AppPrefs.getInstance().internal.editorInfoInspector.key
+                setTitle(R.string.editor_info_inspector)
+                setDefaultValue(false)
+                isIconSpaceReserved = false
+                isSingleLineTitle = false
+            })
+            addPreference(R.string.restart_fcitx_instance) {
+                AlertDialog.Builder(context)
+                    .setTitle(R.string.restart_fcitx_instance)
+                    .setMessage(R.string.restart_fcitx_instance_confirm)
+                    .setNegativeButton(android.R.string.cancel, null)
+                    .setPositiveButton(android.R.string.ok) { _, _ ->
+                        lifecycleScope.launch {
+                            withContext(NonCancellable + Dispatchers.IO) {
+                                FcitxDaemon.stopFcitx()
+                                withContext(Dispatchers.Main) {
+                                    context.toast(R.string.done)
+                                }
+                            }
+                        }
+                    }
+                    .show()
+            }
+            addPreference(R.string.delete_and_sync_data) {
                 AlertDialog.Builder(context)
                     .setTitle(R.string.delete_and_sync_data)
                     .setMessage(R.string.delete_and_sync_data_message)
                     .setPositiveButton(android.R.string.ok) { _, _ ->
-                        lifecycleScope.launch(Dispatchers.IO) {
+                        lifecycleScope.launch(NonCancellable + Dispatchers.IO) {
                             DataManager.deleteAndSync()
-                            launch(Dispatchers.Main) {
-                                Toast.makeText(
-                                    context,
-                                    getString(R.string.synced),
-                                    Toast.LENGTH_SHORT
-                                )
-                                    .show()
+                            withContext(Dispatchers.Main) {
+                                context.toast(R.string.synced)
                             }
                         }
                     }
-                    .setNegativeButton(android.R.string.cancel) { _, _ -> }
+                    .setNegativeButton(android.R.string.cancel, null)
                     .show()
-                true
             }
-        })
-        screen.addPreference(Preference(context).apply {
-            setTitle(R.string.clear_clb_db)
-            isIconSpaceReserved = false
-            isSingleLineTitle = false
-            setOnPreferenceClickListener {
-                lifecycleScope.launch {
-                    ClipboardManager.nukeTable()
-                    Toast.makeText(context, getString(R.string.done), Toast.LENGTH_SHORT).show()
-                }
-                true
+            addPreference(R.string.clear_clb_db) {
+                AlertDialog.Builder(context)
+                    .setTitle(R.string.clear_clb_db)
+                    .setMessage(R.string.clear_clp_db_confirm)
+                    .setPositiveButton(android.R.string.ok) { _, _ ->
+                        lifecycleScope.launch(NonCancellable + Dispatchers.IO) {
+                            ClipboardManager.nukeTable()
+                            withContext(Dispatchers.Main) {
+                                context.toast(R.string.done)
+                            }
+                        }
+                    }
+                    .setNegativeButton(android.R.string.cancel, null)
+                    .show()
             }
-        })
-        preferenceScreen = screen
+            addPreference(R.string.capture_heap_dump) {
+                val fileName = "${context.packageName}_${iso8601UTCDateTime()}.hprof"
+                hprofFile = context.cacheDir.resolve(fileName)
+                System.gc()
+                Debug.dumpHprofData(hprofFile.absolutePath)
+                launcher.launch(fileName)
+            }
+        }
     }
 
-
-    override fun onResume() {
-        super.onResume()
-        viewModel.setToolbarTitle(getString(R.string.developer))
-        viewModel.disableToolbarSaveButton()
-    }
 }

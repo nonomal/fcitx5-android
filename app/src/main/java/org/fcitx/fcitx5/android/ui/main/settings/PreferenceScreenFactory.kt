@@ -1,23 +1,50 @@
+/*
+ * SPDX-License-Identifier: LGPL-2.1-or-later
+ * SPDX-FileCopyrightText: Copyright 2021-2024 Fcitx5 for Android Contributors
+ */
 package org.fcitx.fcitx5.android.ui.main.settings
 
+import android.app.AlertDialog
 import android.content.Context
+import android.os.Build
+import androidx.core.content.ContextCompat
 import androidx.core.os.bundleOf
 import androidx.fragment.app.FragmentManager
 import androidx.navigation.fragment.findNavController
-import androidx.preference.*
+import androidx.preference.DialogPreference
+import androidx.preference.EditTextPreference
+import androidx.preference.ListPreference
+import androidx.preference.Preference
 import androidx.preference.Preference.SummaryProvider
-import arrow.core.redeem
+import androidx.preference.PreferenceCategory
+import androidx.preference.PreferenceDataStore
+import androidx.preference.PreferenceManager
+import androidx.preference.PreferenceScreen
+import arrow.core.getOrElse
 import org.fcitx.fcitx5.android.R
 import org.fcitx.fcitx5.android.core.Key
 import org.fcitx.fcitx5.android.core.RawConfig
 import org.fcitx.fcitx5.android.data.prefs.AppPrefs
+import org.fcitx.fcitx5.android.ui.main.modified.MySwitchPreference
 import org.fcitx.fcitx5.android.ui.main.settings.addon.AddonConfigFragment
 import org.fcitx.fcitx5.android.ui.main.settings.global.GlobalConfigFragment
 import org.fcitx.fcitx5.android.ui.main.settings.im.InputMethodConfigFragment
+import org.fcitx.fcitx5.android.utils.LongClickPreference
+import org.fcitx.fcitx5.android.utils.buildDocumentsProviderIntent
+import org.fcitx.fcitx5.android.utils.buildPrimaryStorageIntent
 import org.fcitx.fcitx5.android.utils.config.ConfigDescriptor
-import org.fcitx.fcitx5.android.utils.config.ConfigDescriptor.*
+import org.fcitx.fcitx5.android.utils.config.ConfigDescriptor.ConfigBool
+import org.fcitx.fcitx5.android.utils.config.ConfigDescriptor.ConfigCustom
+import org.fcitx.fcitx5.android.utils.config.ConfigDescriptor.ConfigEnum
+import org.fcitx.fcitx5.android.utils.config.ConfigDescriptor.ConfigEnumList
+import org.fcitx.fcitx5.android.utils.config.ConfigDescriptor.ConfigExternal
+import org.fcitx.fcitx5.android.utils.config.ConfigDescriptor.ConfigInt
+import org.fcitx.fcitx5.android.utils.config.ConfigDescriptor.ConfigKey
+import org.fcitx.fcitx5.android.utils.config.ConfigDescriptor.ConfigList
+import org.fcitx.fcitx5.android.utils.config.ConfigDescriptor.ConfigString
 import org.fcitx.fcitx5.android.utils.config.ConfigType
 import org.fcitx.fcitx5.android.utils.parcelableArray
+import org.fcitx.fcitx5.android.utils.toast
 
 object PreferenceScreenFactory {
 
@@ -37,7 +64,8 @@ object PreferenceScreenFactory {
 
         ConfigDescriptor
             .parseTopLevel(desc)
-            .redeem({ throw it }) {
+            .getOrElse { throw it }
+            .let {
                 screen.title = it.name
                 it.values.forEach { d ->
                     general(context, fragmentManager, cfg, screen, d, store, save)
@@ -125,6 +153,48 @@ object PreferenceScreenFactory {
             }
         }
 
+        fun pinyinCustomPhrase() = Preference(context).apply {
+            setOnPreferenceClickListener {
+                val currentFragment = fragmentManager.findFragmentById(R.id.nav_host_fragment)!!
+                val action = when (currentFragment) {
+                    is AddonConfigFragment -> R.id.action_addonConfigFragment_to_pinyinCustomPhraseFragment
+                    is InputMethodConfigFragment -> R.id.action_imConfigFragment_to_pinyinCustomPhraseFragment
+                    else -> throw IllegalStateException("Can not navigate to custom phrase editor from current fragment")
+                }
+                currentFragment.findNavController().navigate(action)
+                true
+            }
+        }
+
+        fun rimeUserDataDir(title: String): Preference = LongClickPreference(context).apply {
+            setOnPreferenceClickListener {
+                AlertDialog.Builder(context)
+                    .setTitle(title)
+                    .setMessage(R.string.open_rime_user_data_dir)
+                    .setNegativeButton(android.R.string.cancel, null)
+                    .setPositiveButton(android.R.string.ok) { _, _ ->
+                        try {
+                            context.startActivity(buildDocumentsProviderIntent())
+                        } catch (e: Exception) {
+                            context.toast(e)
+                        }
+                    }
+                    .show()
+                true
+            }
+
+            // make it a hidden option, because of compatibility issues
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                setOnPreferenceLongClickListener {
+                    try {
+                        context.startActivity(buildPrimaryStorageIntent("data/rime"))
+                    } catch (e: Exception) {
+                        context.toast(e)
+                    }
+                }
+            }
+        }
+
         fun listPreference(subtype: ConfigType<*>): Preference = object : Preference(context) {
             override fun onClick() {
                 val currentFragment = fragmentManager.findFragmentById(R.id.nav_host_fragment)!!
@@ -182,7 +252,7 @@ object PreferenceScreenFactory {
         }
 
         when (descriptor) {
-            is ConfigBool -> SwitchPreferenceCompat(context).apply {
+            is ConfigBool -> MySwitchPreference(context).apply {
                 summary = descriptor.tooltip
                 setDefaultValue(descriptor.defaultValue)
             }
@@ -204,12 +274,16 @@ object PreferenceScreenFactory {
                 ConfigExternal.ETy.Chttrans -> addonConfigPreference("chttrans")
                 ConfigExternal.ETy.TableGlobal -> addonConfigPreference("table")
                 ConfigExternal.ETy.AndroidTable -> tableInputMethod()
+                ConfigExternal.ETy.PinyinCustomPhrase -> pinyinCustomPhrase()
+                ConfigExternal.ETy.RimeUserDataDir -> rimeUserDataDir(
+                    descriptor.description ?: descriptor.name
+                )
                 else -> stubPreference()
             }
             is ConfigInt -> {
                 val min = descriptor.intMin
                 val max = descriptor.intMax
-                if (min != null && max != null) {
+                if (min != null && max != null && max - min <= 100) {
                     DialogSeekBarPreference(context).apply {
                         summaryProvider = DialogSeekBarPreference.SimpleSummaryProvider
                         descriptor.defaultValue?.let { setDefaultValue(it) }
@@ -249,7 +323,11 @@ object PreferenceScreenFactory {
                 dialogMessage = descriptor.tooltip
             }
             setOnPreferenceChangeListener { _, _ ->
-                save()
+                // setOnPreferenceChangeListener runs before preferenceDataStore was updated,
+                // post to save() to make sure store has been updated (hopefully)
+                ContextCompat.getMainExecutor(context).execute {
+                    save()
+                }
                 true
             }
             screen.addPreference(this)

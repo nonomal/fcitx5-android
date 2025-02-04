@@ -1,30 +1,28 @@
+/*
+ * SPDX-License-Identifier: LGPL-2.1-or-later
+ * SPDX-FileCopyrightText: Copyright 2021-2023 Fcitx5 for Android Contributors
+ */
 package org.fcitx.fcitx5.android.input
 
 import android.inputmethodservice.InputMethodService
-import android.view.View
 import androidx.annotation.CallSuper
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.LifecycleRegistry
-import androidx.lifecycle.ViewTreeLifecycleOwner
+import androidx.lifecycle.setViewTreeLifecycleOwner
 
 open class LifecycleInputMethodService : InputMethodService(), LifecycleOwner {
+
     private val lifecycleRegistry by lazy { LifecycleRegistry(this) }
 
-    override fun getLifecycle(): Lifecycle = lifecycleRegistry
+    override val lifecycle = lifecycleRegistry
 
     @CallSuper
     override fun onCreate() {
         super.onCreate()
+        window.window!!.decorView.setViewTreeLifecycleOwner(this)
         lifecycleRegistry.handleLifecycleEvent(Lifecycle.Event.ON_CREATE)
         lifecycleRegistry.handleLifecycleEvent(Lifecycle.Event.ON_START)
-    }
-
-    @CallSuper
-    override fun onCreateInputView(): View? {
-        val decorView = window.window!!.decorView
-        ViewTreeLifecycleOwner.set(decorView, this)
-        return null
     }
 
     @CallSuper

@@ -1,8 +1,12 @@
+/*
+ * SPDX-License-Identifier: LGPL-2.1-or-later
+ * SPDX-FileCopyrightText: Copyright 2021-2023 Fcitx5 for Android Contributors
+ */
 package org.fcitx.fcitx5.android.input.dialog
 
 import android.content.Context
 import org.fcitx.fcitx5.android.core.FcitxAPI
-import splitties.systemservices.inputMethodManager
+import org.fcitx.fcitx5.android.utils.inputMethodManager
 
 data class InputMethodData(
     val uniqueName: String,
@@ -14,7 +18,7 @@ data class InputMethodData(
             val enabled = fcitx.enabledIme()
                 .map { InputMethodData(it.uniqueName, it.displayName, false) }
                 .toMutableList()
-            enabled += inputMethodManager.enabledInputMethodList
+            enabled += context.inputMethodManager.enabledInputMethodList
                 .filter { it.packageName != context.packageName }
                 .map {
                     val label = it.loadLabel(context.packageManager).toString()

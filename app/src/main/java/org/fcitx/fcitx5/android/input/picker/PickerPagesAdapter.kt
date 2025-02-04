@@ -1,3 +1,7 @@
+/*
+ * SPDX-License-Identifier: LGPL-2.1-or-later
+ * SPDX-FileCopyrightText: Copyright 2021-2025 Fcitx5 for Android Contributors
+ */
 package org.fcitx.fcitx5.android.input.picker
 
 import android.view.ViewGroup
@@ -5,15 +9,16 @@ import androidx.recyclerview.widget.RecyclerView
 import org.fcitx.fcitx5.android.data.RecentlyUsed
 import org.fcitx.fcitx5.android.data.theme.Theme
 import org.fcitx.fcitx5.android.input.keyboard.KeyActionListener
-import org.fcitx.fcitx5.android.input.popup.PopupListener
+import org.fcitx.fcitx5.android.input.popup.PopupActionListener
 
 class PickerPagesAdapter(
     val theme: Theme,
     private val keyActionListener: KeyActionListener,
-    private val popupListener: PopupListener,
+    private val popupActionListener: PopupActionListener,
     data: List<Pair<PickerData.Category, Array<String>>>,
-    val density: PickerPageUi.Density,
-    recentlyUsedFileName: String
+    private val density: PickerPageUi.Density,
+    recentlyUsedFileName: String,
+    private val bordered: Boolean = false
 ) : RecyclerView.Adapter<PickerPagesAdapter.ViewHolder>() {
 
     class ViewHolder(val ui: PickerPageUi) : RecyclerView.ViewHolder(ui.root)
@@ -37,6 +42,7 @@ class PickerPagesAdapter(
      */
     private val recentlyUsed = RecentlyUsed(recentlyUsedFileName, density.pageSize)
 
+    @Suppress("JoinDeclarationAndAssignment")
     val categories: List<PickerData.Category>
 
     init {
@@ -106,7 +112,7 @@ class PickerPagesAdapter(
     override fun getItemCount() = pages.size
 
     override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): ViewHolder {
-        return ViewHolder(PickerPageUi(parent.context, theme, density))
+        return ViewHolder(PickerPageUi(parent.context, theme, density, bordered))
     }
 
     override fun onBindViewHolder(holder: ViewHolder, position: Int) {
@@ -117,18 +123,18 @@ class PickerPagesAdapter(
         holder.ui.keyActionListener = keyActionListener
         if (holder.bindingAdapterPosition == 0) {
             // prevent popup on RecentlyUsed page
-            holder.ui.popupListener = null
+            holder.ui.popupActionListener = null
             // update RecentlyUsed when it's page attached
             updateRecent()
             holder.ui.setItems(pages[0])
         } else {
-            holder.ui.popupListener = popupListener
+            holder.ui.popupActionListener = popupActionListener
         }
     }
 
     override fun onViewDetachedFromWindow(holder: ViewHolder) {
         holder.ui.keyActionListener = null
-        holder.ui.popupListener = null
+        holder.ui.popupActionListener = null
     }
 
     companion object {

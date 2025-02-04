@@ -1,22 +1,23 @@
+/*
+ * SPDX-License-Identifier: LGPL-2.1-or-later
+ * SPDX-FileCopyrightText: Copyright 2021-2023 Fcitx5 for Android Contributors
+ */
 package org.fcitx.fcitx5.android.input.editing
 
 import android.view.KeyEvent
 import android.view.View
-import androidx.lifecycle.lifecycleScope
 import org.fcitx.fcitx5.android.R
-import org.fcitx.fcitx5.android.core.FcitxKeyMapping
-import org.fcitx.fcitx5.android.daemon.FcitxConnection
-import org.fcitx.fcitx5.android.daemon.launchOnFcitxReady
+import org.fcitx.fcitx5.android.data.InputFeedbacks
+import org.fcitx.fcitx5.android.data.prefs.AppPrefs
+import org.fcitx.fcitx5.android.data.theme.ThemeManager
 import org.fcitx.fcitx5.android.input.FcitxInputMethodService
 import org.fcitx.fcitx5.android.input.broadcast.InputBroadcastReceiver
 import org.fcitx.fcitx5.android.input.clipboard.ClipboardWindow
-import org.fcitx.fcitx5.android.input.dependency.fcitx
 import org.fcitx.fcitx5.android.input.dependency.inputMethodService
 import org.fcitx.fcitx5.android.input.dependency.theme
 import org.fcitx.fcitx5.android.input.keyboard.CustomGestureView
 import org.fcitx.fcitx5.android.input.wm.InputWindow
 import org.fcitx.fcitx5.android.input.wm.InputWindowManager
-import org.fcitx.fcitx5.android.utils.inputConnection
 import org.mechdancer.dependency.manager.must
 
 class TextEditingWindow : InputWindow.ExtendedInputWindow<TextEditingWindow>(),
@@ -24,8 +25,13 @@ class TextEditingWindow : InputWindow.ExtendedInputWindow<TextEditingWindow>(),
 
     private val service: FcitxInputMethodService by manager.inputMethodService()
     private val windowManager: InputWindowManager by manager.must()
-    private val fcitx: FcitxConnection by manager.fcitx()
     private val theme by manager.theme()
+
+    private val hapticOnRepeat by AppPrefs.getInstance().keyboard.hapticOnRepeat
+
+    private val buttonRipple by ThemeManager.prefs.keyRippleEffect
+    private val buttonBorder by ThemeManager.prefs.keyBorder
+    private val buttonRadius by ThemeManager.prefs.textEditingButtonRadius
 
     private var hasSelection = false
     private var userSelection = false
@@ -35,11 +41,14 @@ class TextEditingWindow : InputWindow.ExtendedInputWindow<TextEditingWindow>(),
     }
 
     private val ui by lazy {
-        TextEditingUi(context, theme).apply {
+        TextEditingUi(context, theme, buttonRipple, buttonBorder, buttonRadius.toFloat()).apply {
             fun CustomGestureView.onClickWithRepeating(block: () -> Unit) {
                 setOnClickListener { block() }
                 repeatEnabled = true
-                onRepeatListener = { block() }
+                onRepeatListener = {
+                    block()
+                    if (hapticOnRepeat) InputFeedbacks.hapticFeedback(this)
+                }
             }
 
             leftButton.onClickWithRepeating { sendDirectionKey(KeyEvent.KEYCODE_DPAD_LEFT) }
@@ -55,36 +64,33 @@ class TextEditingWindow : InputWindow.ExtendedInputWindow<TextEditingWindow>(),
             selectButton.setOnClickListener {
                 if (hasSelection) {
                     userSelection = false
-                    val end = service.selection.end
-                    service.inputConnection?.setSelection(end, end)
+                    service.cancelSelection()
                 } else {
                     userSelection = !userSelection
-                    updateSelection(hasSelection, userSelection)
+                    updateSelection(false, userSelection)
                 }
             }
             selectAllButton.setOnClickListener {
                 // activate select button after operation
                 userSelection = true
-                service.inputConnection?.performContextMenuAction(android.R.id.selectAll)
+                service.currentInputConnection?.performContextMenuAction(android.R.id.selectAll)
             }
             cutButton.setOnClickListener {
                 // deactivate select button after operation
                 userSelection = false
-                service.inputConnection?.performContextMenuAction(android.R.id.cut)
+                service.currentInputConnection?.performContextMenuAction(android.R.id.cut)
             }
             copyButton.setOnClickListener {
                 userSelection = false
-                service.inputConnection?.performContextMenuAction(android.R.id.copy)
+                service.currentInputConnection?.performContextMenuAction(android.R.id.copy)
             }
             pasteButton.setOnClickListener {
                 userSelection = false
-                service.inputConnection?.performContextMenuAction(android.R.id.paste)
+                service.currentInputConnection?.performContextMenuAction(android.R.id.paste)
             }
             backspaceButton.onClickWithRepeating {
                 userSelection = false
-                service.lifecycleScope.launchOnFcitxReady(fcitx) {
-                    it.sendKey(FcitxKeyMapping.FcitxKey_BackSpace)
-                }
+                service.sendDownUpKeyEvents(KeyEvent.KEYCODE_DEL)
             }
             clipboardButton.setOnClickListener {
                 windowManager.attachWindow(ClipboardWindow())
@@ -95,8 +101,8 @@ class TextEditingWindow : InputWindow.ExtendedInputWindow<TextEditingWindow>(),
     override fun onCreateView(): View = ui.root
 
     override fun onAttached() {
-        val info = service.selection
-        onSelectionUpdate(info.start, info.end)
+        val range = service.currentInputSelection
+        onSelectionUpdate(range.start, range.end)
     }
 
     override fun onDetached() {}

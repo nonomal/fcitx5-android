@@ -1,3 +1,7 @@
+/*
+ * SPDX-License-Identifier: LGPL-2.1-or-later
+ * SPDX-FileCopyrightText: Copyright 2021-2023 Fcitx5 for Android Contributors
+ */
 package org.fcitx.fcitx5.android.data.table
 
 import org.fcitx.fcitx5.android.R
@@ -13,10 +17,6 @@ import java.util.zip.ZipInputStream
 
 object TableManager {
 
-    init {
-        System.loadLibrary("tabledictionaryutils")
-    }
-
     private val inputMethodDir = File(
         appContext.getExternalFilesDir(null)!!, "data/inputmethod"
     ).also { it.mkdirs() }
@@ -26,31 +26,27 @@ object TableManager {
     ).also { it.mkdirs() }
 
     fun inputMethods(): List<TableBasedInputMethod> =
-        inputMethodDir
-            .listFiles()
-            ?.mapNotNull { confFile ->
-                runCatching {
-                    TableBasedInputMethod.new(confFile).apply {
-                        table = runCatching {
-                            File(tableDicDir, tableFileName)
-                                .takeIf { it.extension == "dict" }
-                                ?.let { LibIMEDictionary(it) }
-                        }.getOrNull()
+        inputMethodDir.listFiles()?.mapNotNull { confFile ->
+            runCatching {
+                TableBasedInputMethod.new(confFile).apply {
+                    runCatching {
+                        table = LibIMEDictionary(File(tableDicDir, tableFileName))
                     }
-                }.getOrNull()
-            } ?: listOf()
+                }
+            }.getOrNull()
+        } ?: emptyList()
 
     fun importFromZip(src: InputStream): Result<TableBasedInputMethod> =
         runCatching {
             ZipInputStream(src).use { zipStream ->
                 withTempDir { tempDir ->
                     val extracted = zipStream.extract(tempDir)
-                    val confFile =
-                        extracted.find { it.name.endsWith(".conf") || it.name.endsWith(".conf.in") }
-                            ?: errorRuntime(R.string.exception_table_im)
-                    val dictFile =
-                        extracted.find { it.name.endsWith(".dict") || it.name.endsWith(".txt") }
-                            ?: errorRuntime(R.string.exception_table)
+                    val confFile = extracted.find { it.name.endsWith(".conf") }
+                        ?: extracted.find { it.name.endsWith(".conf.in") }
+                        ?: errorRuntime(R.string.exception_table_im)
+                    val dictFile = extracted.find { it.name.endsWith(".dict") }
+                        ?: extracted.find { it.name.endsWith(".txt") }
+                        ?: errorRuntime(R.string.exception_table)
                     importFiles(confFile, dictFile)
                 }
             }
@@ -63,11 +59,11 @@ object TableManager {
         dictStream: InputStream
     ): Result<TableBasedInputMethod> = runCatching {
         withTempDir { tempDir ->
-            val confFile = File(tempDir, confName).apply {
-                outputStream().use { o -> confStream.use { i -> i.copyTo(o) } }
+            val confFile = File(tempDir, confName).also {
+                it.outputStream().use { o -> confStream.use { i -> i.copyTo(o) } }
             }
-            val dictFile = File(tempDir, dictName).apply {
-                outputStream().use { o -> dictStream.use { i -> i.copyTo(o) } }
+            val dictFile = File(tempDir, dictName).also {
+                it.outputStream().use { o -> dictStream.use { i -> i.copyTo(o) } }
             }
             importFiles(confFile, dictFile)
         }
@@ -83,7 +79,7 @@ object TableManager {
             TableBasedInputMethod.new(importedConfFile)
         }.getOrElse {
             importedConfFile.delete()
-            errorRuntime(R.string.invalid_im, it.message)
+            throw it
         }
         val table = Dictionary.new(dictFile)!!
         im.tableFileName = TableBasedInputMethod.fixedTableFileName(table.name)
@@ -95,6 +91,27 @@ object TableManager {
         }
         im.save()
         return im
+    }
+
+    fun replaceTableDict(
+        im: TableBasedInputMethod,
+        dictName: String,
+        dictStream: InputStream
+    ): Result<LibIMEDictionary> = runCatching {
+        withTempDir { tempDir ->
+            val dictFile = File(tempDir, dictName).also {
+                it.outputStream().use { o -> dictStream.use { i -> i.copyTo(o) } }
+            }
+            val dict = Dictionary.new(dictFile)!!
+            runCatching {
+                dict.toLibIMEDictionary(File(tempDir, im.tableFileName))
+            }.onSuccess {
+                it.file.copyTo(File(tableDicDir, im.tableFileName), overwrite = true)
+            }.onFailure {
+                dictFile.delete()
+                errorRuntime(R.string.invalid_table_dict, it.message)
+            }.getOrThrow()
+        }
     }
 
     @JvmStatic

@@ -1,77 +1,40 @@
-import android.databinding.tool.ext.capitalizeUS
-import com.android.build.gradle.internal.tasks.factory.dependsOn
-import com.google.common.hash.Hashing
-import com.google.common.io.Files
-import groovy.json.JsonOutput
-import groovy.json.JsonSlurper
-import java.io.ByteArrayOutputStream
-import java.nio.charset.Charset
-
-fun exec(cmd: String): String = ByteArrayOutputStream().use {
-    project.exec {
-        commandLine = cmd.split(" ")
-        standardOutput = it
-    }
-    it.toString().trim()
-}
-
-val gitCommitHash = exec("git rev-parse HEAD")
-val gitVersionName = exec("git describe --tags --long --always")
-
 plugins {
-    id("com.android.application")
-    kotlin("android")
-    id("com.google.devtools.ksp") version "1.8.0-1.0.8"
-    id("com.cookpad.android.plugin.license-tools") version "1.2.8"
-    kotlin("plugin.serialization") version "1.8.0"
-    kotlin("plugin.parcelize")
-}
-
-val dataDescriptorName = "descriptor.json"
-
-// NOTE: increase this value to bump version code
-val baseVersionCode = 1
-
-fun calculateVersionCode(abi: String): Int {
-    val abiId = when (abi) {
-        "armeabi-v7a" -> 1
-        "arm64-v8a" -> 2
-        "x86" -> 3
-        "x86_64" -> 4
-        else -> 0
-    }
-    return baseVersionCode * 10 + abiId
-}
-
-// will be used if `targetABI` is unset
-val defaultABI = "arm64-v8a"
-val targetABI: String = System.getenv("ABI").let {
-    if (it.isNullOrBlank()) defaultABI else it
+    id("org.fcitx.fcitx5.android.app-convention")
+    id("org.fcitx.fcitx5.android.native-app-convention")
+    id("org.fcitx.fcitx5.android.build-metadata")
+    id("org.fcitx.fcitx5.android.data-descriptor")
+    id("org.fcitx.fcitx5.android.fcitx-component")
+    alias(libs.plugins.kotlin.parcelize)
+    alias(libs.plugins.kotlin.serialization)
+    alias(libs.plugins.ksp)
 }
 
 android {
     namespace = "org.fcitx.fcitx5.android"
-    compileSdk = 33
-    buildToolsVersion = "33.0.0"
-    ndkVersion = System.getenv("NDK_VERSION") ?: "25.0.8775105"
 
     defaultConfig {
         applicationId = "org.fcitx.fcitx5.android"
-        minSdk = 23
-        targetSdk = 33
-        versionCode = calculateVersionCode(targetABI)
-        versionName = gitVersionName
-        setProperty("archivesBaseName", "$applicationId-$gitVersionName")
-        buildConfigField("String", "BUILD_GIT_HASH", "\"$gitCommitHash\"")
-        buildConfigField("long", "BUILD_TIME", System.currentTimeMillis().toString())
-        buildConfigField("String", "DATA_DESCRIPTOR_NAME", "\"${dataDescriptorName}\"")
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+
+        @Suppress("UnstableApiUsage")
+        externalNativeBuild {
+            cmake {
+                targets(
+                    // jni
+                    "native-lib",
+                    // copy fcitx5 built-in addon libraries
+                    "copy-fcitx5-modules",
+                    // android specific modules
+                    "androidfrontend",
+                    "androidkeyboard",
+                    "androidnotification"
+                )
+            }
+        }
     }
 
     buildTypes {
-        getByName("release") {
-            isMinifyEnabled = true
-            isShrinkResources = true
+        release {
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
@@ -81,28 +44,10 @@ android {
             resValue("mipmap", "app_icon_round", "@mipmap/ic_launcher_round")
             resValue("string", "app_name", "@string/app_name_release")
         }
-        getByName("debug") {
-            applicationIdSuffix = ".debug"
-
+        debug {
             resValue("mipmap", "app_icon", "@mipmap/ic_launcher_debug")
             resValue("mipmap", "app_icon_round", "@mipmap/ic_launcher_round_debug")
             resValue("string", "app_name", "@string/app_name_debug")
-        }
-    }
-
-    splits {
-        abi {
-            isEnable = true
-            reset()
-            include(targetABI)
-            isUniversalApk = false
-        }
-    }
-
-    externalNativeBuild {
-        cmake {
-            version = "3.22.1"
-            path("src/main/cpp/CMakeLists.txt")
         }
     }
 
@@ -110,258 +55,98 @@ android {
         viewBinding = true
     }
 
-    compileOptions {
-        isCoreLibraryDesugaringEnabled = true
-        sourceCompatibility = JavaVersion.VERSION_11
-        targetCompatibility = JavaVersion.VERSION_11
-    }
-
-    kotlinOptions {
-        jvmTarget = "11"
-    }
-
-    packagingOptions {
-        jniLibs {
-            useLegacyPackaging = true
-        }
+    androidResources {
+        @Suppress("UnstableApiUsage")
+        generateLocaleConfig = true
     }
 }
+
 kotlin {
     sourceSets.configureEach {
-        kotlin.srcDir("$buildDir/generated/ksp/$name/kotlin/")
+        kotlin.srcDir(layout.buildDirectory.dir("generated/ksp/$name/kotlin"))
     }
 }
 
-kotlin.sourceSets.all {
-    languageSettings.optIn("kotlin.RequiresOptIn")
-}
-
-// This task should have depended on buildCMakeABITask
-val installFcitxComponent by tasks.register("installFcitxComponent")
-
-val generateDataDescriptor by tasks.register<DataDescriptorTask>("generateDataDescriptor") {
-    inputDir.set(file("src/main/assets"))
-    outputFile.set(file("src/main/assets/${dataDescriptorName}"))
-    dependsOn(installFcitxComponent)
-    dependsOn(tasks.findByName("generateLicenseJson"))
-}
-/**
- * Note *Graph*
- * Tasks registered by [installFcitxComponent] implicitly depend .cxx dir to install generated files.
- * Since the native task `buildCMake$Variant$ABI` depend on the current variant and ABI,
- * we should have registered [installFcitxComponent] tasks for the cartesian product of $Variant and $ABI.
- * However, this would be way more tedious, as the build variant and ABI do not affect components we are going to install.
- * The essential cause of this situation is that it's impossible for gradle to handle dynamic dependencies,
- * where once the build graph was evaluated, no dependencies can be changed. So a trick is used here: when the task graph
- * is evaluated, we look into it to find out the name of the native task which will be executed, and then store its output
- * path in global variable. Tasks in [installFcitxComponent] are using the output path of the native task WITHOUT explicitly
- * depending on it.
- */
-project.gradle.taskGraph.whenReady {
-    val buildCMakeABITask = allTasks
-        .find { it.name.startsWith("buildCMakeDebug[") || it.name.startsWith("buildCMakeRelWithDebInfo[") }
-    if (buildCMakeABITask != null) {
-        val cmakeDir = buildCMakeABITask.outputs.files.first().parentFile
-        ext.set("cmakeDir", cmakeDir)
+fcitxComponent {
+    includeLibs = listOf(
+        "fcitx5",
+        "fcitx5-lua",
+        "libime",
+        "fcitx5-chinese-addons"
+    )
+    // exclude (delete immediately after install) tables that nobody would use
+    excludeFiles = listOf("cangjie", "erbi", "qxm", "wanfeng").map {
+        "usr/share/fcitx5/inputmethod/$it.conf"
     }
+    installPrebuiltAssets = true
 }
-android.applicationVariants.all {
-    val variantName = name.capitalizeUS()
-    tasks.findByName("merge${variantName}Assets")?.dependsOn(generateDataDescriptor)
-}
-
-/**
- * DO NOT run these tasks manually. See Note *Graph* for details.
- */
-fun installFcitxComponent(targetName: String, componentName: String, destDir: File) {
-    // Deliberately use doLast to wait ext be set
-    val build by tasks.register("buildFcitx${componentName.capitalizeUS()}") {
-        doLast {
-            try {
-                exec {
-                    workingDir = ext.get("cmakeDir") as File
-                    commandLine("cmake", "--build", ".", "--target", targetName)
-                }
-            } catch (e: Exception) {
-                logger.log(LogLevel.ERROR, "Failed to build target $targetName: ${e.message}")
-                logger.log(LogLevel.ERROR, "Did you run this task independently?")
-                throw e
-            }
-        }
-
-        // make sure that this task runs after than the native task
-        mustRunAfter("buildCMakeDebug[$targetABI]")
-        mustRunAfter("buildCMakeRelWithDebInfo[$targetABI]")
-    }
-
-    tasks.register("installFcitx${componentName.capitalizeUS()}") {
-        doLast {
-            try {
-                exec {
-                    environment("DESTDIR", destDir.absolutePath)
-                    workingDir = ext.get("cmakeDir") as File
-                    commandLine("cmake", "--install", ".", "--component", componentName)
-                }
-            } catch (e: Exception) {
-                logger.log(
-                    LogLevel.ERROR,
-                    "Failed to install component $componentName: ${e.message}"
-                )
-                logger.log(LogLevel.ERROR, "Did you run this task independently?")
-                throw e
-            }
-        }
-
-        dependsOn(build)
-    }.also { installFcitxComponent.dependsOn(it) }
-}
-
-installFcitxComponent("generate-desktop-file", "config", file("src/main/assets"))
-installFcitxComponent("translation-file", "translation", file("src/main/assets"))
 
 ksp {
     arg("room.schemaLocation", "$projectDir/schemas")
 }
 
-tasks.register<Delete>("cleanGeneratedAssets") {
-    delete(file("src/main/assets/usr/share/locale"))
-    // delete all non symlink dirs
-    delete(file("src/main/assets/usr/share/fcitx5").listFiles()?.filter {
-        // https://stackoverflow.com/questions/813710/java-1-6-determine-symbolic-links
-        File(it.parentFile.canonicalFile, it.name).let { s ->
-            s.canonicalFile == s.absoluteFile
-        }
-    })
-    delete(file("src/main/assets/${dataDescriptorName}"))
-    delete(file("src/main/assets/licenses.json"))
-}.also { tasks.clean.dependsOn(it) }
-
-tasks.register<Delete>("cleanCxxIntermediates") {
-    delete(file(".cxx"))
-}.also { tasks.clean.dependsOn(it) }
-
 dependencies {
-    implementation("org.ini4j:ini4j:0.5.4")
     ksp(project(":codegen"))
-    coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:1.2.2")
-    implementation("io.arrow-kt:arrow-core:1.1.3")
-    implementation("androidx.activity:activity-ktx:1.6.1")
-    implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.4.1")
-    implementation("com.github.CanHub:Android-Image-Cropper:4.2.1")
-    implementation("cat.ereza:customactivityoncrash:2.4.0")
-    implementation("com.google.android.flexbox:flexbox:3.0.0")
-    implementation("org.mechdancer:dependency:0.1.2")
-    val roomVersion = "2.4.3"
-    implementation("androidx.room:room-runtime:$roomVersion")
-    ksp("androidx.room:room-compiler:$roomVersion")
-    implementation("androidx.room:room-ktx:$roomVersion")
-    implementation("net.java.dev.jna:jna:5.12.1@aar")
-    implementation("com.jakewharton.timber:timber:5.0.1")
-    implementation("androidx.core:core-ktx:1.9.0")
-    implementation("androidx.appcompat:appcompat:1.5.1")
-    implementation("androidx.constraintlayout:constraintlayout:2.1.4")
-    val lifecycleVersion = "2.5.1"
-    implementation("androidx.lifecycle:lifecycle-runtime-ktx:$lifecycleVersion")
-    implementation("androidx.lifecycle:lifecycle-service:$lifecycleVersion")
-    implementation("androidx.lifecycle:lifecycle-common-java8:$lifecycleVersion")
-    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.6.4")
-    implementation("androidx.preference:preference-ktx:1.2.0")
-    implementation("androidx.recyclerview:recyclerview:1.2.1")
-    implementation("androidx.viewpager2:viewpager2:1.0.0")
-    val navVersion = "2.5.3"
-    implementation("androidx.navigation:navigation-fragment-ktx:$navVersion")
-    implementation("androidx.navigation:navigation-ui-ktx:$navVersion")
-    val splittiesVersion = "3.0.0"
-    implementation("com.louiscad.splitties:splitties-bitflags:$splittiesVersion")
-    implementation("com.louiscad.splitties:splitties-systemservices:$splittiesVersion")
-    implementation("com.louiscad.splitties:splitties-views-dsl:$splittiesVersion")
-    implementation("com.louiscad.splitties:splitties-views-dsl-constraintlayout:$splittiesVersion")
-    implementation("com.louiscad.splitties:splitties-views-dsl-recyclerview:$splittiesVersion")
-    implementation("com.louiscad.splitties:splitties-views-recyclerview:$splittiesVersion")
-    implementation("com.louiscad.splitties:splitties-views-dsl-material:$splittiesVersion")
-    testImplementation("junit:junit:4.13.2")
-    androidTestImplementation("androidx.test:runner:1.5.2")
-    androidTestImplementation("androidx.test:rules:1.5.0")
-    androidTestImplementation("androidx.lifecycle:lifecycle-runtime-testing:2.5.1")
-    androidTestImplementation("junit:junit:4.13.2")
+    implementation(project(":lib:fcitx5"))
+    implementation(project(":lib:fcitx5-lua"))
+    implementation(project(":lib:libime"))
+    implementation(project(":lib:fcitx5-chinese-addons"))
+    implementation(project(":lib:common"))
+    implementation(libs.kotlinx.coroutines)
+    implementation(libs.kotlinx.serialization.json)
+    implementation(libs.androidx.activity)
+    implementation(libs.androidx.appcompat)
+    implementation(libs.androidx.autofill)
+    implementation(libs.androidx.constraintlayout)
+    implementation(libs.androidx.coordinatorlayout)
+    implementation(libs.androidx.core.ktx)
+    implementation(libs.androidx.lifecycle.viewmodel)
+    implementation(libs.androidx.lifecycle.livedata)
+    implementation(libs.androidx.lifecycle.runtime)
+    implementation(libs.androidx.lifecycle.common)
+    implementation(libs.androidx.lifecycle.service)
+    implementation(libs.androidx.navigation.fragment)
+    implementation(libs.androidx.navigation.ui)
+    implementation(libs.androidx.paging)
+    implementation(libs.androidx.preference)
+    implementation(libs.androidx.recyclerview)
+    ksp(libs.androidx.room.compiler)
+    implementation(libs.androidx.room.runtime)
+    implementation(libs.androidx.room.ktx)
+    implementation(libs.androidx.room.paging)
+    implementation(libs.androidx.startup)
+    implementation(libs.androidx.viewpager2)
+    implementation(libs.material)
+    implementation(libs.arrow.core)
+    implementation(libs.arrow.functions)
+    implementation(libs.imagecropper)
+    implementation(libs.flexbox)
+    implementation(libs.dependency)
+    implementation(libs.timber)
+    implementation(libs.splitties.bitflags)
+    implementation(libs.splitties.dimensions)
+    implementation(libs.splitties.resources)
+    implementation(libs.splitties.views.dsl)
+    implementation(libs.splitties.views.dsl.appcompat)
+    implementation(libs.splitties.views.dsl.constraintlayout)
+    implementation(libs.splitties.views.dsl.coordinatorlayout)
+    implementation(libs.splitties.views.dsl.recyclerview)
+    implementation(libs.splitties.views.recyclerview)
+    implementation(libs.aboutlibraries.core)
+    testImplementation(libs.junit)
+    androidTestImplementation(libs.androidx.test.runner)
+    androidTestImplementation(libs.androidx.test.rules)
+    androidTestImplementation(libs.androidx.lifecycle.testing)
+    androidTestImplementation(libs.junit)
 }
 
-abstract class DataDescriptorTask : DefaultTask() {
-    @get:Incremental
-    @get:PathSensitive(PathSensitivity.NAME_ONLY)
-    @get:InputDirectory
-    abstract val inputDir: DirectoryProperty
-
-    @get:OutputFile
-    abstract val outputFile: RegularFileProperty
-
-    private val file by lazy { outputFile.get().asFile }
-
-    private fun serialize(map: Map<String, String>) {
-        file.deleteOnExit()
-        file.writeText(
-            JsonOutput.prettyPrint(
-                JsonOutput.toJson(
-                    mapOf<Any, Any>(
-                        "sha256" to Hashing.sha256()
-                            .hashString(
-                                map.entries.joinToString { it.key + it.value },
-                                Charset.defaultCharset()
-                            )
-                            .toString(),
-                        "files" to map
-                    )
-                )
-            )
-        )
-    }
-
-    @Suppress("UNCHECKED_CAST")
-    private fun deserialize(): Map<String, String> =
-        ((JsonSlurper().parseText(file.readText()) as Map<Any, Any>))["files"] as Map<String, String>
-
-    companion object {
-        fun sha256(file: File): String =
-            Files.asByteSource(file).hash(Hashing.sha256()).toString()
-    }
-
-    @TaskAction
-    fun execute(inputChanges: InputChanges) {
-        val map =
-            file.exists()
-                .takeIf { it }
-                ?.runCatching {
-                    deserialize()
-                        // remove all old dirs
-                        .filterValues { it.isNotBlank() }
-                        .toMutableMap()
-                }
-                ?.getOrNull()
-                ?: mutableMapOf()
-
-        fun File.allParents(): List<File> =
-            if (parentFile == null || parentFile.path in map)
-                listOf()
-            else
-                listOf(parentFile) + parentFile.allParents()
-        inputChanges.getFileChanges(inputDir).forEach { change ->
-            if (change.file.name == file.name)
-                return@forEach
-            logger.log(LogLevel.DEBUG, "${change.changeType}: ${change.normalizedPath}")
-            val relativeFile = change.file.relativeTo(file.parentFile)
-            val key = relativeFile.path
-            if (change.changeType == ChangeType.REMOVED) {
-                map.remove(key)
-            } else {
-                map[key] = sha256(change.file)
-            }
-        }
-        // calculate dirs
-        inputDir.asFileTree.forEach {
-            it.relativeTo(file.parentFile).allParents().forEach { p ->
-                map[p.path] = ""
-            }
-        }
-        serialize(map.toSortedMap())
+@Suppress("UnstableApiUsage")
+configurations {
+    all {
+        // remove Baseline Profile Installer or whatever it is...
+        exclude(group = "androidx.profileinstaller", module = "profileinstaller")
+        // remove unwanted splitties libraries...
+        exclude(group = "com.louiscad.splitties", module = "splitties-appctx")
+        exclude(group = "com.louiscad.splitties", module = "splitties-systemservices")
     }
 }

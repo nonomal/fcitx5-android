@@ -1,3 +1,7 @@
+/*
+ * SPDX-License-Identifier: LGPL-2.1-or-later
+ * SPDX-FileCopyrightText: Copyright 2021-2023 Fcitx5 for Android Contributors
+ */
 package org.fcitx.fcitx5.android.input.popup
 
 /**
@@ -25,8 +29,8 @@ val PopupPreset: Map<String, Array<String>> = hashMapOf(
     "g" to arrayOf("=", "G", "ğ"),
     "h" to arrayOf("/", "H"),
     "j" to arrayOf("#", "J"),
-    "k" to arrayOf("(", "K"),
-    "l" to arrayOf(")", "L", "ł"),
+    "k" to arrayOf("(", "[", "{", "K"),
+    "l" to arrayOf(")", "]", "}", "L", "ł"),
     "z" to arrayOf("'", "Z", "`", "ž", "ź", "ż"),
     "x" to arrayOf(":", "X", "×"),
     "c" to arrayOf("\"", "C", "ç", "ć", "č"),
@@ -140,9 +144,10 @@ val PopupPreset: Map<String, Array<String>> = hashMapOf(
     "%" to arrayOf("‰", "℅"),
     "^" to arrayOf("↑", "↓", "←", "→"),
     "+" to arrayOf("±"),
-    "<" to arrayOf("«", "≤", "‹", "⟨"),
+    "<" to arrayOf("≤", "«", "‹", "⟨"),
     "=" to arrayOf("∞", "≠", "≈"),
-    ">" to arrayOf("⟩", "»", "≥", "›"),
+    ">" to arrayOf("≥", "»", "›", "⟩"),
+    "°" to arrayOf("′", "″", "‴"),
     //
     // Currency
     //

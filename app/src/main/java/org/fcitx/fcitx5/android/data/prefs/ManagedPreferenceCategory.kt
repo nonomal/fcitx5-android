@@ -1,3 +1,7 @@
+/*
+ * SPDX-License-Identifier: LGPL-2.1-or-later
+ * SPDX-FileCopyrightText: Copyright 2021-2023 Fcitx5 for Android Contributors
+ */
 package org.fcitx.fcitx5.android.data.prefs
 
 import android.content.SharedPreferences
@@ -43,6 +47,21 @@ abstract class ManagedPreferenceCategory(
         pref.register()
         ui.registerUi()
         return pref
+    }
+
+    protected inline fun <reified T> enumList(
+        @StringRes
+        title: Int,
+        key: String,
+        defaultValue: T,
+        noinline enableUiOn: (() -> Boolean)? = null
+    ): ManagedPreference.PStringLike<T> where T : Enum<T>, T : ManagedPreferenceEnum {
+        val codec = object : ManagedPreference.StringLikeCodec<T> {
+            override fun decode(raw: String): T = enumValueOf(raw)
+        }
+        val entryValues = enumValues<T>().toList()
+        val entryLabels = entryValues.map { it.stringRes }
+        return list(title, key, defaultValue, codec, entryValues, entryLabels, enableUiOn)
     }
 
     protected fun int(

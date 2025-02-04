@@ -1,11 +1,15 @@
+/*
+ * SPDX-License-Identifier: LGPL-2.1-or-later
+ * SPDX-FileCopyrightText: Copyright 2021-2023 Fcitx5 for Android Contributors
+ */
 package org.fcitx.fcitx5.android.input.keyboard
 
 import android.annotation.SuppressLint
 import android.content.Context
-import android.view.inputmethod.EditorInfo
 import org.fcitx.fcitx5.android.R
 import org.fcitx.fcitx5.android.data.theme.Theme
 import org.fcitx.fcitx5.android.input.picker.PickerWindow
+import org.fcitx.fcitx5.android.input.popup.PopupAction
 import splitties.views.imageResource
 
 @SuppressLint("ViewConstructor")
@@ -41,10 +45,10 @@ class NumberKeyboard(
             ),
             listOf(
                 LayoutSwitchKey("ABC", TextKeyboard.Name),
-                SymbolKey(",", variant = KeyDef.Appearance.Variant.Alternative),
+                NumPadKey(",", 0xffac, 23f, 0.1f, KeyDef.Appearance.Variant.Alternative),
                 LayoutSwitchKey("!?#", PickerWindow.Key.Symbol.name, 0.13333f, KeyDef.Appearance.Variant.AltForeground),
                 NumPadKey("0", 0xffb0, 30f, 0.23334f),
-                SymbolKey("=", 0.13333f),
+                NumPadKey("=", 0xffbd, 23f, 0.13333f, KeyDef.Appearance.Variant.AltForeground),
                 NumPadKey(".", 0xffae, 23f, 0.1f, KeyDef.Appearance.Variant.Alternative),
                 ReturnKey()
             )
@@ -55,8 +59,13 @@ class NumberKeyboard(
     val space: TextKeyView by lazy { findViewById(R.id.button_mini_space) }
     val `return`: ImageKeyView by lazy { findViewById(R.id.button_return) }
 
-    override fun onAttach(info: EditorInfo?) {
-        `return`.img.imageResource = drawableForReturn(info)
+    override fun onReturnDrawableUpdate(returnDrawable: Int) {
+        `return`.img.imageResource = returnDrawable
+    }
+
+    @SuppressLint("MissingSuperCall")
+    override fun onPopupAction(action: PopupAction) {
+        // leave empty on purpose to disable popup in NumberKeyboard
     }
 
 }

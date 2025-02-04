@@ -1,8 +1,13 @@
+/*
+ * SPDX-License-Identifier: LGPL-2.1-or-later
+ * SPDX-FileCopyrightText: Copyright 2021-2023 Fcitx5 for Android Contributors
+ */
 package org.fcitx.fcitx5.android.ui.main
 
 import android.os.Bundle
-import android.view.View
+import android.view.Menu
 import android.view.ViewGroup
+import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.ActivityResultLauncher
 import androidx.activity.result.contract.ActivityResultContracts.CreateDocument
 import androidx.appcompat.app.AlertDialog
@@ -11,7 +16,6 @@ import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.updateLayoutParams
 import androidx.lifecycle.lifecycleScope
-import cat.ereza.customactivityoncrash.CustomActivityOnCrash
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.launch
@@ -19,31 +23,40 @@ import org.fcitx.fcitx5.android.FcitxApplication
 import org.fcitx.fcitx5.android.R
 import org.fcitx.fcitx5.android.databinding.ActivityLogBinding
 import org.fcitx.fcitx5.android.ui.main.log.LogView
-import org.fcitx.fcitx5.android.utils.*
+import org.fcitx.fcitx5.android.utils.DeviceInfo
+import org.fcitx.fcitx5.android.utils.Logcat
+import org.fcitx.fcitx5.android.utils.iso8601UTCDateTime
+import org.fcitx.fcitx5.android.utils.item
+import org.fcitx.fcitx5.android.utils.toast
+import splitties.resources.styledColor
+import splitties.views.topPadding
 
 class LogActivity : AppCompatActivity() {
+
+    private var fromCrash = false
 
     private lateinit var launcher: ActivityResultLauncher<String>
     private lateinit var logView: LogView
 
     private fun registerLauncher() {
         launcher = registerForActivityResult(CreateDocument("text/plain")) { uri ->
+            if (uri == null) return@registerForActivityResult
             lifecycleScope.launch(NonCancellable + Dispatchers.IO) {
-                uri?.runCatching {
-                    contentResolver.openOutputStream(this)?.use { stream ->
+                runCatching {
+                    contentResolver.openOutputStream(uri)!!.use { stream ->
                         stream.bufferedWriter().use { writer ->
                             writer.write(DeviceInfo.get(this@LogActivity))
                             writer.write(logView.currentLog)
                         }
                     }
-                }?.toast(this@LogActivity)
+                }.let { toast(it) }
             }
         }
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        applyTranslucentSystemBars()
+        enableEdgeToEdge()
         val binding = ActivityLogBinding.inflate(layoutInflater)
         ViewCompat.setOnApplyWindowInsetsListener(binding.root) { _, windowInsets ->
             val statusBars = windowInsets.getInsets(WindowInsetsCompat.Type.statusBars())
@@ -51,11 +64,9 @@ class LogActivity : AppCompatActivity() {
             binding.root.updateLayoutParams<ViewGroup.MarginLayoutParams> {
                 leftMargin = navBars.left
                 rightMargin = navBars.right
-                bottomMargin = navBars.bottom
             }
-            binding.toolbar.updateLayoutParams<ViewGroup.MarginLayoutParams> {
-                topMargin = statusBars.top
-            }
+            binding.toolbar.topPadding = statusBars.top
+            binding.logView.setBottomPadding(navBars.bottom)
             windowInsets
         }
         setContentView(binding.root)
@@ -63,31 +74,43 @@ class LogActivity : AppCompatActivity() {
         with(binding) {
             setSupportActionBar(toolbar)
             this@LogActivity.logView = logView
-            logView.setLogcat(
-                if (CustomActivityOnCrash.getConfigFromIntent(intent) == null) {
-                    supportActionBar!!.apply {
-                        setDisplayHomeAsUpEnabled(true)
-                        setTitle(R.string.real_time_logs)
-                    }
-                    Logcat()
-                } else {
-                    supportActionBar!!.setTitle(R.string.crash_logs)
-                    clearButton.visibility = View.GONE
-                    AlertDialog.Builder(this@LogActivity)
-                        .setTitle(R.string.app_crash)
-                        .setMessage(R.string.app_crash_message)
-                        .setPositiveButton(android.R.string.ok) { _, _ -> }
-                        .show()
-                    Logcat(FcitxApplication.getLastPid())
+            if (intent.hasExtra(FROM_CRASH)) {
+                fromCrash = true
+                supportActionBar!!.setTitle(R.string.crash_logs)
+                AlertDialog.Builder(this@LogActivity)
+                    .setTitle(R.string.app_crash)
+                    .setMessage(R.string.app_crash_message)
+                    .setPositiveButton(android.R.string.ok, null)
+                    .show()
+                logView.append("--------- Crash stacktrace")
+                logView.append(intent.getStringExtra(CRASH_STACK_TRACE) ?: "<empty>")
+                logView.setLogcat(Logcat(FcitxApplication.getLastPid()))
+            } else {
+                supportActionBar!!.apply {
+                    setDisplayHomeAsUpEnabled(true)
+                    setTitle(R.string.real_time_logs)
                 }
-            )
-            clearButton.setOnClickListener {
-                logView.clear()
-            }
-            exportButton.setOnClickListener {
-                launcher.launch("$packageName-${iso8601UTCDateTime()}.txt")
+                logView.setLogcat(Logcat())
             }
         }
         registerLauncher()
+    }
+
+    override fun onCreateOptionsMenu(menu: Menu): Boolean {
+        val iconTint = styledColor(android.R.attr.colorControlNormal)
+        if (!fromCrash) {
+            menu.item(R.string.clear, R.drawable.ic_baseline_delete_24, iconTint, true) {
+                logView.clear()
+            }
+        }
+        menu.item(R.string.export, R.drawable.ic_baseline_save_24, iconTint, true) {
+            launcher.launch("$packageName-${iso8601UTCDateTime()}.txt")
+        }
+        return true
+    }
+
+    companion object {
+        const val FROM_CRASH = "from_crash"
+        const val CRASH_STACK_TRACE = "crash_stack_trace"
     }
 }

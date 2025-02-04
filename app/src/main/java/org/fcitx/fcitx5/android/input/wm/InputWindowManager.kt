@@ -1,3 +1,7 @@
+/*
+ * SPDX-License-Identifier: LGPL-2.1-or-later
+ * SPDX-FileCopyrightText: Copyright 2021-2023 Fcitx5 for Android Contributors
+ */
 package org.fcitx.fcitx5.android.input.wm
 
 import android.view.View
@@ -11,7 +15,6 @@ import org.fcitx.fcitx5.android.input.broadcast.InputBroadcastReceiver
 import org.fcitx.fcitx5.android.input.broadcast.InputBroadcaster
 import org.fcitx.fcitx5.android.input.dependency.UniqueViewComponent
 import org.fcitx.fcitx5.android.input.dependency.context
-import org.fcitx.fcitx5.android.utils.isUiThread
 import org.mechdancer.dependency.DynamicScope
 import org.mechdancer.dependency.manager.must
 import org.mechdancer.dependency.minusAssign
@@ -54,19 +57,24 @@ class InputWindowManager : UniqueViewComponent<InputWindowManager, FrameLayout>(
     }
 
     /**
-     * Associate essential window with its key
-     * This function does not create any view nor set up the scope
+     * Associate essential window with its key and add it to scope
+     * If [createView] is `true`, the view will be created immediately.
+     * Otherwise, it will be created on first attach
      */
     @Suppress("BOUNDS_NOT_ALLOWED_IF_BOUNDED_BY_TYPE_PARAMETER")
-    fun <W : InputWindow, E : EssentialWindow, R> addEssentialWindow(window: R) where R : W, R : E {
-        ensureThread()
+    fun <W : InputWindow, E : EssentialWindow, R> addEssentialWindow(
+        window: R,
+        createView: Boolean = false
+    ) where R : W, R : E {
         if (window.key in essentialWindows) {
-            if (essentialWindows[window.key] === window)
+            if (essentialWindows[window.key]!!.first === window)
                 Timber.d("Skip adding essential window $window")
             else
                 throw IllegalStateException("${window.key} is already occupied")
         }
-        essentialWindows[window.key] = window to null
+        scope += window
+        val view = if (createView) window.onCreateView() else null
+        essentialWindows[window.key] = window to view
     }
 
     fun getEssentialWindow(windowKey: EssentialWindow.Key) =
@@ -80,7 +88,6 @@ class InputWindowManager : UniqueViewComponent<InputWindowManager, FrameLayout>(
      * Moreover, [attachWindow] can also add the essential window with key.
      */
     fun attachWindow(windowKey: EssentialWindow.Key) {
-        ensureThread()
         essentialWindows[windowKey]?.let { (window, _) ->
             attachWindow(window)
         } ?: throw IllegalStateException("$windowKey is not a known essential window key")
@@ -106,7 +113,6 @@ class InputWindowManager : UniqueViewComponent<InputWindowManager, FrameLayout>(
      * [attachWindow] includes the operation done by [addEssentialWindow].
      */
     fun attachWindow(window: InputWindow) {
-        ensureThread()
         if (window === currentWindow)
             Timber.d("Skip attaching $window")
         val newView = if (window is EssentialWindow) {
@@ -158,8 +164,5 @@ class InputWindowManager : UniqueViewComponent<InputWindowManager, FrameLayout>(
         this.scope = scope
     }
 
-    private fun ensureThread() {
-        if (!isUiThread())
-            throw IllegalThreadStateException("Window manager must be operated in main thread!")
-    }
+    fun isAttached(window: InputWindow) = currentWindow === window
 }

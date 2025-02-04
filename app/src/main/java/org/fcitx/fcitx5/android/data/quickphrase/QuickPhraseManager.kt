@@ -1,9 +1,14 @@
+/*
+ * SPDX-License-Identifier: LGPL-2.1-or-later
+ * SPDX-FileCopyrightText: Copyright 2021-2023 Fcitx5 for Android Contributors
+ */
 package org.fcitx.fcitx5.android.data.quickphrase
 
 import org.fcitx.fcitx5.android.R
-import org.fcitx.fcitx5.android.data.DataManager
+import org.fcitx.fcitx5.android.core.data.DataManager
 import org.fcitx.fcitx5.android.utils.appContext
-import org.fcitx.fcitx5.android.utils.errorArg
+import org.fcitx.fcitx5.android.utils.errorRuntime
+import org.fcitx.fcitx5.android.utils.withTempDir
 import java.io.File
 import java.io.InputStream
 
@@ -33,27 +38,29 @@ object QuickPhraseManager {
         return CustomQuickPhrase(file)
     }
 
-    fun importFromFile(file: File): Result<CustomQuickPhrase> {
-        if (file.extension != QuickPhrase.EXT)
-            errorArg(R.string.exception_quickphrase_filename, file.path)
-        // throw away data, only ensuring the format is correct
-        return QuickPhraseData.fromLines(file.readLines()).map {
+    private fun importFromFile(file: File): Result<CustomQuickPhrase> {
+        return runCatching {
+            // check quickphrase format of each line
+            file.readLines().forEachIndexed { idx, line ->
+                if (line.isNotBlank() && QuickPhraseEntry.fromLine(line) == null) {
+                    errorRuntime(R.string.exception_quickphrase_parse, "\n(${idx + 1}) $line")
+                }
+            }
             val dest = File(customQuickPhraseDir, file.name)
             file.copyTo(dest)
             CustomQuickPhrase(dest)
         }
     }
 
-    fun importFromInputStream(stream: InputStream, name: String): Result<CustomQuickPhrase> {
-        val tempFile = File(appContext.cacheDir, name)
-        tempFile.outputStream().use {
-            stream.copyTo(it)
+    fun importFromInputStream(stream: InputStream, fileName: String): Result<CustomQuickPhrase> {
+        return stream.use { i ->
+            withTempDir { dir ->
+                val tempFile = dir.resolve(fileName)
+                tempFile.outputStream().use { o -> i.copyTo(o) }
+                importFromFile(tempFile)
+            }
         }
-        val new = importFromFile(tempFile)
-        tempFile.delete()
-        return new
     }
-
 
     private fun <T : QuickPhrase> listDir(
         dir: File,

@@ -1,6 +1,10 @@
+/*
+ * SPDX-License-Identifier: LGPL-2.1-or-later
+ * SPDX-FileCopyrightText: Copyright 2021-2024 Fcitx5 for Android Contributors
+ */
+
 package org.fcitx.fcitx5.android.ui.main.settings.theme
 
-import android.annotation.SuppressLint
 import android.content.Context
 import android.content.res.Configuration
 import android.graphics.Color
@@ -9,16 +13,30 @@ import android.view.View
 import android.widget.FrameLayout
 import android.widget.ImageView
 import androidx.constraintlayout.widget.ConstraintLayout
-import androidx.core.view.*
+import androidx.core.view.ViewCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.updateLayoutParams
 import org.fcitx.fcitx5.android.data.prefs.AppPrefs
+import org.fcitx.fcitx5.android.data.prefs.ManagedPreference
 import org.fcitx.fcitx5.android.data.theme.Theme
 import org.fcitx.fcitx5.android.data.theme.ThemeManager
-import org.fcitx.fcitx5.android.data.theme.ThemeManager.Prefs.NavbarBackground
+import org.fcitx.fcitx5.android.data.theme.ThemePrefs.NavbarBackground
 import org.fcitx.fcitx5.android.input.keyboard.TextKeyboard
+import org.fcitx.fcitx5.android.utils.navbarFrameHeight
 import splitties.dimensions.dp
 import splitties.views.backgroundColor
-import splitties.views.dsl.constraintlayout.*
-import splitties.views.dsl.core.*
+import splitties.views.dsl.constraintlayout.below
+import splitties.views.dsl.constraintlayout.centerHorizontally
+import splitties.views.dsl.constraintlayout.centerInParent
+import splitties.views.dsl.constraintlayout.constraintLayout
+import splitties.views.dsl.constraintlayout.lParams
+import splitties.views.dsl.constraintlayout.matchConstraints
+import splitties.views.dsl.core.Ui
+import splitties.views.dsl.core.add
+import splitties.views.dsl.core.horizontalMargin
+import splitties.views.dsl.core.imageView
+import splitties.views.dsl.core.lParams
+import splitties.views.dsl.core.view
 import splitties.views.imageDrawable
 
 class KeyboardPreviewUi(override val ctx: Context, val theme: Theme) : Ui {
@@ -55,8 +73,12 @@ class KeyboardPreviewUi(override val ctx: Context, val theme: Theme) : Ui {
             return ctx.dp(value)
         }
 
-    private val navbarBackground by ThemeManager.prefs.navbarBackground
+    private val navbarBackground = ThemeManager.prefs.navbarBackground
     private val keyBorder by ThemeManager.prefs.keyBorder
+
+    private val navbarBkgChangeListener = ManagedPreference.OnChangeListener<Any> { _, _ ->
+        recalculateSize()
+    }
 
     private val bkg = imageView {
         scaleType = ImageView.ScaleType.CENTER_CROP
@@ -71,15 +93,34 @@ class KeyboardPreviewUi(override val ctx: Context, val theme: Theme) : Ui {
 
     private val fakeInputView = constraintLayout {
         add(bkg, lParams {
-            centerVertically()
-            centerHorizontally()
+            centerInParent()
         })
         add(fakeKawaiiBar, lParams(height = dp(40)) {
             centerHorizontally()
         })
     }
 
-    override val root: FrameLayout
+    override val root = object : FrameLayout(ctx) {
+        init {
+            add(fakeInputView, lParams())
+        }
+
+        override fun onAttachedToWindow() {
+            super.onAttachedToWindow()
+            recalculateSize()
+            onSizeMeasured?.invoke(intrinsicWidth, intrinsicHeight)
+            navbarBackground.registerOnChangeListener(navbarBkgChangeListener)
+        }
+
+        override fun onConfigurationChanged(newConfig: Configuration?) {
+            recalculateSize()
+        }
+
+        override fun onDetachedFromWindow() {
+            navbarBackground.unregisterOnChangeListener(navbarBkgChangeListener)
+            super.onDetachedFromWindow()
+        }
+    }
 
     var onSizeMeasured: ((Int, Int) -> Unit)? = null
 
@@ -95,34 +136,11 @@ class KeyboardPreviewUi(override val ctx: Context, val theme: Theme) : Ui {
         return w to (h * hPercent / 100)
     }
 
-    /**
-     * https://android.googlesource.com/platform/frameworks/base/+/refs/tags/android-11.0.0_r48/services/core/java/com/android/server/wm/DisplayPolicy.java#3221
-     * https://android.googlesource.com/platform/frameworks/base/+/refs/tags/android-11.0.0_r48/services/core/java/com/android/server/wm/DisplayPolicy.java#3059
-     */
-    private fun navbarHeight() = ctx.resources.run {
-        @SuppressLint("DiscouragedApi")
-        val id = getIdentifier("navigation_bar_frame_height", "dimen", "android")
-        if (id > 0) getDimensionPixelSize(id) else 0
-    }
-
     init {
         val (w, h) = keyboardWindowAspectRatio()
         keyboardWidth = w
         keyboardHeight = h
         setTheme(theme)
-        root = object : FrameLayout(ctx) {
-            override fun onAttachedToWindow() {
-                super.onAttachedToWindow()
-                recalculateSize()
-                onSizeMeasured?.invoke(intrinsicWidth, intrinsicHeight)
-            }
-
-            override fun onConfigurationChanged(newConfig: Configuration?) {
-                recalculateSize()
-            }
-        }.apply {
-            add(fakeInputView, lParams())
-        }
     }
 
     fun recalculateSize() {
@@ -139,15 +157,15 @@ class KeyboardPreviewUi(override val ctx: Context, val theme: Theme) : Ui {
         // extra bottom padding
         intrinsicHeight += keyboardBottomPaddingPx
         // windowInsets navbar padding
-        if (navbarBackground == NavbarBackground.Full) {
+        if (navbarBackground.getValue() == NavbarBackground.Full) {
             ViewCompat.getRootWindowInsets(root)?.also {
                 // IME window has different navbar height when system navigation in "gesture navigation" mode
                 // thus the inset from Activity root window is unreliable
                 if (it.getInsets(WindowInsetsCompat.Type.navigationBars()).bottom > 0 ||
                     // in case navigation hint was hidden ...
-                    it.getInsets(WindowInsetsCompat.Type.systemGestures()).bottom > 0
+                    it.getInsets(WindowInsetsCompat.Type.mandatorySystemGestures()).bottom > 0
                 ) {
-                    intrinsicHeight += navbarHeight()
+                    intrinsicHeight += ctx.navbarFrameHeight()
                 }
             }
         }
@@ -167,7 +185,9 @@ class KeyboardPreviewUi(override val ctx: Context, val theme: Theme) : Ui {
             fakeInputView.removeView(fakeKeyboardWindow)
         }
         fakeKawaiiBar.backgroundColor = if (keyBorder) Color.TRANSPARENT else theme.barColor
-        fakeKeyboardWindow = TextKeyboard(ctx, theme)
+        fakeKeyboardWindow = TextKeyboard(ctx, theme).also {
+            it.onAttach()
+        }
         fakeInputView.apply {
             add(fakeKeyboardWindow, lParams(matchConstraints, keyboardHeight) {
                 below(fakeKawaiiBar)

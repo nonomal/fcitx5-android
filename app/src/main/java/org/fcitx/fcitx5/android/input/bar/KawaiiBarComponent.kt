@@ -1,27 +1,53 @@
+/*
+ * SPDX-License-Identifier: LGPL-2.1-or-later
+ * SPDX-FileCopyrightText: Copyright 2021-2023 Fcitx5 for Android Contributors
+ */
 package org.fcitx.fcitx5.android.input.bar
 
 import android.graphics.Color
 import android.os.Build
+import android.util.Size
 import android.view.KeyEvent
 import android.view.View
+import android.view.ViewGroup
 import android.view.inputmethod.EditorInfo
+import android.view.inputmethod.InlineSuggestion
+import android.view.inputmethod.InlineSuggestionsResponse
+import android.view.inputmethod.InputMethodSubtype
 import android.widget.FrameLayout
 import android.widget.ViewAnimator
+import android.widget.inline.InlineContentView
+import androidx.annotation.Keep
+import androidx.annotation.RequiresApi
 import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import org.fcitx.fcitx5.android.R
-import org.fcitx.fcitx5.android.core.FcitxEvent
+import org.fcitx.fcitx5.android.core.CapabilityFlag
+import org.fcitx.fcitx5.android.core.CapabilityFlags
+import org.fcitx.fcitx5.android.core.FcitxEvent.CandidateListEvent
 import org.fcitx.fcitx5.android.data.clipboard.ClipboardManager
+import org.fcitx.fcitx5.android.data.clipboard.db.ClipboardEntry
 import org.fcitx.fcitx5.android.data.prefs.AppPrefs
 import org.fcitx.fcitx5.android.data.prefs.ManagedPreference
 import org.fcitx.fcitx5.android.data.theme.ThemeManager
-import org.fcitx.fcitx5.android.input.bar.ExpandButtonStateMachine.State.*
-import org.fcitx.fcitx5.android.input.bar.IdleUiStateMachine.TransitionEvent.*
-import org.fcitx.fcitx5.android.input.bar.KawaiiBarStateMachine.TransitionEvent.*
+import org.fcitx.fcitx5.android.input.bar.ExpandButtonStateMachine.State.ClickToAttachWindow
+import org.fcitx.fcitx5.android.input.bar.ExpandButtonStateMachine.State.ClickToDetachWindow
+import org.fcitx.fcitx5.android.input.bar.ExpandButtonStateMachine.State.Hidden
+import org.fcitx.fcitx5.android.input.bar.KawaiiBarStateMachine.BooleanKey.CandidateEmpty
+import org.fcitx.fcitx5.android.input.bar.KawaiiBarStateMachine.BooleanKey.PreeditEmpty
+import org.fcitx.fcitx5.android.input.bar.KawaiiBarStateMachine.TransitionEvent.CandidatesUpdated
+import org.fcitx.fcitx5.android.input.bar.KawaiiBarStateMachine.TransitionEvent.ExtendedWindowAttached
+import org.fcitx.fcitx5.android.input.bar.KawaiiBarStateMachine.TransitionEvent.PreeditUpdated
+import org.fcitx.fcitx5.android.input.bar.KawaiiBarStateMachine.TransitionEvent.WindowDetached
+import org.fcitx.fcitx5.android.input.bar.ui.CandidateUi
+import org.fcitx.fcitx5.android.input.bar.ui.IdleUi
+import org.fcitx.fcitx5.android.input.bar.ui.TitleUi
 import org.fcitx.fcitx5.android.input.broadcast.InputBroadcastReceiver
-import org.fcitx.fcitx5.android.input.candidates.HorizontalCandidateComponent
+import org.fcitx.fcitx5.android.input.candidates.horizontal.HorizontalCandidateComponent
 import org.fcitx.fcitx5.android.input.candidates.expanded.ExpandedCandidateStyle
 import org.fcitx.fcitx5.android.input.candidates.expanded.window.FlexboxExpandedCandidateWindow
 import org.fcitx.fcitx5.android.input.candidates.expanded.window.GridExpandedCandidateWindow
@@ -31,84 +57,99 @@ import org.fcitx.fcitx5.android.input.dependency.context
 import org.fcitx.fcitx5.android.input.dependency.inputMethodService
 import org.fcitx.fcitx5.android.input.dependency.theme
 import org.fcitx.fcitx5.android.input.editing.TextEditingWindow
+import org.fcitx.fcitx5.android.input.keyboard.CommonKeyActionListener
+import org.fcitx.fcitx5.android.input.keyboard.CustomGestureView
 import org.fcitx.fcitx5.android.input.keyboard.KeyboardWindow
+import org.fcitx.fcitx5.android.input.popup.PopupComponent
 import org.fcitx.fcitx5.android.input.status.StatusAreaWindow
 import org.fcitx.fcitx5.android.input.wm.InputWindow
 import org.fcitx.fcitx5.android.input.wm.InputWindowManager
 import org.fcitx.fcitx5.android.utils.AppUtil
-import org.fcitx.fcitx5.android.utils.inputConnection
+import org.fcitx.fcitx5.android.utils.InputMethodUtil
 import org.mechdancer.dependency.DynamicScope
 import org.mechdancer.dependency.manager.must
 import splitties.bitflags.hasFlag
+import splitties.dimensions.dp
 import splitties.views.backgroundColor
 import splitties.views.dsl.core.add
 import splitties.views.dsl.core.lParams
 import splitties.views.dsl.core.matchParent
-import splitties.views.imageResource
-import timber.log.Timber
+import java.util.concurrent.Executor
+import kotlin.coroutines.resume
+import kotlin.coroutines.suspendCoroutine
+import kotlin.math.min
 
 class KawaiiBarComponent : UniqueViewComponent<KawaiiBarComponent, FrameLayout>(),
     InputBroadcastReceiver {
 
     private val context by manager.context()
     private val theme by manager.theme()
-    private val windowManager: InputWindowManager by manager.must()
     private val service by manager.inputMethodService()
+    private val windowManager: InputWindowManager by manager.must()
     private val horizontalCandidate: HorizontalCandidateComponent by manager.must()
+    private val commonKeyActionListener: CommonKeyActionListener by manager.must()
+    private val popup: PopupComponent by manager.must()
 
-    private val clipboardSuggestion = AppPrefs.getInstance().clipboard.clipboardSuggestion
-    private val clipboardItemTimeout = AppPrefs.getInstance().clipboard.clipboardItemTimeout
-    private val expandedCandidateStyle by AppPrefs.getInstance().keyboard.expandedCandidateStyle
-    private val expandToolbarByDefault = AppPrefs.getInstance().keyboard.expandToolbarByDefault
+    private val prefs = AppPrefs.getInstance()
+
+    private val clipboardSuggestion = prefs.clipboard.clipboardSuggestion
+    private val clipboardItemTimeout = prefs.clipboard.clipboardItemTimeout
+    private val clipboardMaskSensitive by prefs.clipboard.clipboardMaskSensitive
+    private val expandedCandidateStyle by prefs.keyboard.expandedCandidateStyle
+    private val expandToolbarByDefault by prefs.keyboard.expandToolbarByDefault
+    private val toolbarNumRowOnPassword by prefs.keyboard.toolbarNumRowOnPassword
+    private val showVoiceInputButton by prefs.keyboard.showVoiceInputButton
 
     private var clipboardTimeoutJob: Job? = null
 
+    private var isClipboardFresh: Boolean = false
+    private var isInlineSuggestionPresent: Boolean = false
+    private var isCapabilityFlagsPassword: Boolean = false
+    private var isKeyboardLayoutNumber: Boolean = false
+    private var isToolbarManuallyToggled: Boolean = false
+
+    @Keep
     private val onClipboardUpdateListener =
         ClipboardManager.OnClipboardUpdateListener {
             if (!clipboardSuggestion.getValue()) return@OnClipboardUpdateListener
             service.lifecycleScope.launch {
                 if (it.text.isEmpty()) {
-                    idleUiStateMachine.push(ClipboardUpdatedEmpty)
+                    isClipboardFresh = false
                 } else {
-                    idleUi.setClipboardItemText(it.text.take(42))
-                    idleUiStateMachine.push(ClipboardUpdatedNonEmpty)
+                    idleUi.clipboardUi.text.text = if (it.sensitive && clipboardMaskSensitive) {
+                        ClipboardEntry.BULLET.repeat(min(42, it.text.length))
+                    } else {
+                        it.text.take(42)
+                    }
+                    isClipboardFresh = true
                     launchClipboardTimeoutJob()
                 }
+                evalIdleUiState()
             }
         }
 
+    @Keep
     private val onClipboardSuggestionUpdateListener =
         ManagedPreference.OnChangeListener<Boolean> { _, it ->
             if (!it) {
-                idleUiStateMachine.push(ClipboardUpdatedEmpty)
+                isClipboardFresh = false
+                evalIdleUiState()
                 clipboardTimeoutJob?.cancel()
                 clipboardTimeoutJob = null
             }
         }
 
+    @Keep
     private val onClipboardTimeoutUpdateListener =
         ManagedPreference.OnChangeListener<Int> { _, _ ->
-            when (idleUiStateMachine.currentState) {
-                IdleUiStateMachine.State.Clipboard,
-                IdleUiStateMachine.State.ToolbarWithClip -> {
+            when (idleUi.currentState) {
+                IdleUi.State.Clipboard -> {
                     // renew timeout when clipboard suggestion is present
                     launchClipboardTimeoutJob()
                 }
                 else -> {}
             }
         }
-
-    private val onExpandToolbarByDefaultUpdateListener =
-        ManagedPreference.OnChangeListener<Boolean> { _, it ->
-            idleUiStateMachine = IdleUiStateMachine.new(it, idleUiStateMachine)
-        }
-
-    init {
-        ClipboardManager.addOnUpdateListener(onClipboardUpdateListener)
-        clipboardSuggestion.registerOnChangeListener(onClipboardSuggestionUpdateListener)
-        clipboardItemTimeout.registerOnChangeListener(onClipboardTimeoutUpdateListener)
-        expandToolbarByDefault.registerOnChangeListener(onExpandToolbarByDefaultUpdateListener)
-    }
 
     private fun launchClipboardTimeoutJob() {
         clipboardTimeoutJob?.cancel()
@@ -117,61 +158,126 @@ class KawaiiBarComponent : UniqueViewComponent<KawaiiBarComponent, FrameLayout>(
         if (timeout < 0L) return
         clipboardTimeoutJob = service.lifecycleScope.launch {
             delay(timeout)
-            idleUiStateMachine.push(Timeout)
+            isClipboardFresh = false
             clipboardTimeoutJob = null
         }
     }
 
-    private val idleUi: KawaiiBarUi.Idle by lazy {
-        KawaiiBarUi.Idle(context, theme) { idleUiStateMachine.currentState }.apply {
+    private fun evalIdleUiState(fromUser: Boolean = false) {
+        val newState = when {
+            isClipboardFresh -> IdleUi.State.Clipboard
+            isInlineSuggestionPresent -> IdleUi.State.InlineSuggestion
+            isCapabilityFlagsPassword && !isKeyboardLayoutNumber -> IdleUi.State.NumberRow
+            /**
+             * state matrix:
+             *                               expandToolbarByDefault
+             *                          |   \   |    true |   false
+             * isToolbarManuallyToggled |  true |   Empty | Toolbar
+             *                          | false | Toolbar |   Empty
+             */
+            expandToolbarByDefault == isToolbarManuallyToggled -> IdleUi.State.Empty
+            else -> IdleUi.State.Toolbar
+        }
+        if (newState == idleUi.currentState) return
+        idleUi.updateState(newState, fromUser)
+    }
+
+    private val hideKeyboardCallback = View.OnClickListener {
+        service.requestHideSelf(0)
+    }
+
+    private val swipeDownHideKeyboardCallback = CustomGestureView.OnGestureListener { _, e ->
+        if (e.type == CustomGestureView.GestureType.Up && e.totalY > 0) {
+            service.requestHideSelf(0)
+            true
+        } else false
+    }
+
+    private var voiceInputSubtype: Pair<String, InputMethodSubtype>? = null
+
+    private val switchToVoiceInputCallback = View.OnClickListener {
+        val (id, subtype) = voiceInputSubtype ?: return@OnClickListener
+        InputMethodUtil.switchInputMethod(service, id, subtype)
+    }
+
+    private val idleUi: IdleUi by lazy {
+        IdleUi(context, theme, popup, commonKeyActionListener).apply {
             menuButton.setOnClickListener {
-                idleUiStateMachine.push(MenuButtonClicked)
+                when (idleUi.currentState) {
+                    IdleUi.State.Empty -> {
+                        isToolbarManuallyToggled = !expandToolbarByDefault
+                        evalIdleUiState(fromUser = true)
+                    }
+                    IdleUi.State.Toolbar -> {
+                        isToolbarManuallyToggled = expandToolbarByDefault
+                        evalIdleUiState(fromUser = true)
+                    }
+                    else -> {
+                        isToolbarManuallyToggled = !expandToolbarByDefault
+                        idleUi.updateState(IdleUi.State.Toolbar, fromUser = true)
+                    }
+                }
                 // reset timeout timer (if present) when user switch layout
                 if (clipboardTimeoutJob != null) {
                     launchClipboardTimeoutJob()
                 }
             }
-            undoButton.setOnClickListener {
-                service.sendCombinationKeyEvents(KeyEvent.KEYCODE_Z, ctrl = true)
+            hideKeyboardButton.apply {
+                setOnClickListener(hideKeyboardCallback)
+                swipeEnabled = true
+                swipeThresholdY = dp(HEIGHT.toFloat())
+                onGestureListener = swipeDownHideKeyboardCallback
             }
-            redoButton.setOnClickListener {
-                service.sendCombinationKeyEvents(KeyEvent.KEYCODE_Z, ctrl = true, shift = true)
-            }
-            cursorMoveButton.setOnClickListener {
-                windowManager.attachWindow(TextEditingWindow())
-            }
-            clipboardButton.setOnClickListener {
-                windowManager.attachWindow(ClipboardWindow())
-            }
-            moreButton.setOnClickListener {
-                windowManager.attachWindow(StatusAreaWindow())
-            }
-            clipboardSuggestionItem.setOnClickListener {
-                ClipboardManager.lastEntry?.let {
-                    service.inputConnection?.commitText(it.text, 1)
+            buttonsUi.apply {
+                undoButton.setOnClickListener {
+                    service.sendCombinationKeyEvents(KeyEvent.KEYCODE_Z, ctrl = true)
                 }
-                clipboardTimeoutJob?.cancel()
-                clipboardTimeoutJob = null
-                idleUiStateMachine.push(Pasted)
-            }
-            clipboardSuggestionItem.setOnLongClickListener {
-                ClipboardManager.lastEntry?.let {
-                    AppUtil.launchClipboardEdit(context, it.id, true)
+                redoButton.setOnClickListener {
+                    service.sendCombinationKeyEvents(KeyEvent.KEYCODE_Z, ctrl = true, shift = true)
                 }
-                true
+                cursorMoveButton.setOnClickListener {
+                    windowManager.attachWindow(TextEditingWindow())
+                }
+                clipboardButton.setOnClickListener {
+                    windowManager.attachWindow(ClipboardWindow())
+                }
+                moreButton.setOnClickListener {
+                    windowManager.attachWindow(StatusAreaWindow())
+                }
             }
-            hideKeyboardButton.setOnClickListener {
-                service.requestHideSelf(0)
+            clipboardUi.suggestionView.apply {
+                setOnClickListener {
+                    ClipboardManager.lastEntry?.let {
+                        service.commitText(it.text)
+                    }
+                    clipboardTimeoutJob?.cancel()
+                    clipboardTimeoutJob = null
+                    isClipboardFresh = false
+                    evalIdleUiState()
+                }
+                setOnLongClickListener {
+                    ClipboardManager.lastEntry?.let {
+                        AppUtil.launchClipboardEdit(context, it.id, true)
+                    }
+                    true
+                }
             }
-            switchUiByState(idleUiStateMachine.currentState)
         }
     }
 
     private val candidateUi by lazy {
-        KawaiiBarUi.Candidate(context, theme, horizontalCandidate.view)
+        CandidateUi(context, theme, horizontalCandidate.view).apply {
+            expandButton.apply {
+                swipeEnabled = true
+                swipeThresholdY = dp(HEIGHT.toFloat())
+                onGestureListener = swipeDownHideKeyboardCallback
+            }
+        }
     }
 
-    private val titleUi by lazy { KawaiiBarUi.Title(context, theme) }
+    private val titleUi by lazy {
+        TitleUi(context, theme)
+    }
 
     private val barStateMachine = KawaiiBarStateMachine.new {
         switchUiByState(it)
@@ -193,10 +299,6 @@ class KawaiiBarComponent : UniqueViewComponent<KawaiiBarComponent, FrameLayout>(
         }
     }
 
-    private var idleUiStateMachine = IdleUiStateMachine.new(expandToolbarByDefault.getValue()) {
-        idleUi.switchUiByState(it)
-    }
-
     // set expand candidate button to create expand candidate
     private fun setExpandButtonToAttach() {
         candidateUi.expandButton.setOnClickListener {
@@ -207,7 +309,7 @@ class KawaiiBarComponent : UniqueViewComponent<KawaiiBarComponent, FrameLayout>(
                 }
             )
         }
-        candidateUi.expandButton.image.imageResource = R.drawable.ic_baseline_expand_more_24
+        candidateUi.expandButton.setIcon(R.drawable.ic_baseline_expand_more_24)
     }
 
     // set expand candidate button to close expand candidate
@@ -215,32 +317,19 @@ class KawaiiBarComponent : UniqueViewComponent<KawaiiBarComponent, FrameLayout>(
         candidateUi.expandButton.setOnClickListener {
             windowManager.attachWindow(KeyboardWindow)
         }
-        candidateUi.expandButton.image.imageResource = R.drawable.ic_baseline_expand_less_24
+        candidateUi.expandButton.setIcon(R.drawable.ic_baseline_expand_less_24)
     }
 
     // should be used with setExpandButtonToAttach or setExpandButtonToDetach
     private fun setExpandButtonEnabled(enabled: Boolean) {
-        if (enabled)
-            candidateUi.expandButton.visibility = View.VISIBLE
-        else
-            candidateUi.expandButton.visibility = View.INVISIBLE
-    }
-
-    fun onShow() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            idleUi.privateMode(
-                service.editorInfo?.imeOptions?.hasFlag(EditorInfo.IME_FLAG_NO_PERSONALIZED_LEARNING) == true
-            )
-        }
-        idleUiStateMachine.push(KawaiiBarShown)
+        candidateUi.expandButton.visibility = if (enabled) View.VISIBLE else View.INVISIBLE
     }
 
     private fun switchUiByState(state: KawaiiBarStateMachine.State) {
         val index = state.ordinal
-        if (view.displayedChild == index)
-            return
-        Timber.d("Switch bar to $state")
-        if (view.getChildAt(index) != titleUi.root) {
+        if (view.displayedChild == index) return
+        val new = view.getChildAt(index)
+        if (new != titleUi.root) {
             titleUi.setReturnButtonOnClickListener { }
             titleUi.setTitle("")
             titleUi.removeExtension()
@@ -267,20 +356,36 @@ class KawaiiBarComponent : UniqueViewComponent<KawaiiBarComponent, FrameLayout>(
                 onClipboardUpdateListener.onUpdate(it)
             }
         }
+        ClipboardManager.addOnUpdateListener(onClipboardUpdateListener)
+        clipboardSuggestion.registerOnChangeListener(onClipboardSuggestionUpdateListener)
+        clipboardItemTimeout.registerOnChangeListener(onClipboardTimeoutUpdateListener)
     }
 
-    override fun onPreeditUpdate(data: FcitxEvent.PreeditEvent.Data) {
-        barStateMachine.push(
-            if (data.preedit.isEmpty() && data.clientPreedit.isEmpty())
-                PreeditUpdatedEmpty
-            else
-                PreeditUpdatedNonEmpty
+    override fun onStartInput(info: EditorInfo, capFlags: CapabilityFlags) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            idleUi.privateMode(info.imeOptions.hasFlag(EditorInfo.IME_FLAG_NO_PERSONALIZED_LEARNING))
+        }
+        isCapabilityFlagsPassword = toolbarNumRowOnPassword && capFlags.has(CapabilityFlag.Password)
+        isInlineSuggestionPresent = false
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            idleUi.inlineSuggestionsBar.clear()
+        }
+        voiceInputSubtype = InputMethodUtil.firstVoiceInput()
+        val shouldShowVoiceInput =
+            showVoiceInputButton && voiceInputSubtype != null && !capFlags.has(CapabilityFlag.Password)
+        idleUi.setHideKeyboardIsVoiceInput(
+            shouldShowVoiceInput,
+            if (shouldShowVoiceInput) switchToVoiceInputCallback else hideKeyboardCallback
         )
+        evalIdleUiState()
     }
 
-    override fun onCandidateUpdate(data: Array<String>) {
-        if (data.isNotEmpty())
-            barStateMachine.push(CandidateUpdateNonEmpty)
+    override fun onPreeditEmptyStateUpdate(empty: Boolean) {
+        barStateMachine.push(PreeditUpdated, PreeditEmpty to empty)
+    }
+
+    override fun onCandidateUpdate(data: CandidateListEvent.Data) {
+        barStateMachine.push(CandidatesUpdated, CandidateEmpty to data.candidates.isEmpty())
     }
 
     override fun onWindowAttached(window: InputWindow) {
@@ -293,17 +398,78 @@ class KawaiiBarComponent : UniqueViewComponent<KawaiiBarComponent, FrameLayout>(
                 }
                 barStateMachine.push(ExtendedWindowAttached)
             }
-            is InputWindow.SimpleInputWindow<*> -> {
-            }
+            else -> {}
         }
     }
 
     override fun onWindowDetached(window: InputWindow) {
-        barStateMachine.push(
-            if (horizontalCandidate.adapter.candidates.isEmpty())
-                WindowDetachedWithCandidatesEmpty
-            else
-                WindowDetachedWithCandidatesNonEmpty
-        )
+        barStateMachine.push(WindowDetached)
     }
+
+    private val suggestionSize by lazy {
+        Size(ViewGroup.LayoutParams.WRAP_CONTENT, context.dp(HEIGHT))
+    }
+
+    private val directExecutor by lazy {
+        Executor { it.run() }
+    }
+
+    @RequiresApi(Build.VERSION_CODES.R)
+    fun handleInlineSuggestions(response: InlineSuggestionsResponse): Boolean {
+        val suggestions = response.inlineSuggestions
+        if (suggestions.isEmpty()) {
+            isInlineSuggestionPresent = false
+            return true
+        }
+        var pinned: InlineSuggestion? = null
+        val scrollable = mutableListOf<InlineSuggestion>()
+        var extraPinnedCount = 0
+        suggestions.forEach {
+            if (it.info.isPinned) {
+                if (pinned == null) {
+                    pinned = it
+                } else {
+                    scrollable.add(extraPinnedCount++, it)
+                }
+            } else {
+                scrollable.add(it)
+            }
+        }
+        service.lifecycleScope.launch {
+            idleUi.inlineSuggestionsBar.setPinnedView(
+                pinned?.let { inflateInlineContentView(it) }
+            )
+        }
+        service.lifecycleScope.launch {
+            val views = scrollable.map { s ->
+                service.lifecycleScope.async {
+                    inflateInlineContentView(s)
+                }
+            }.awaitAll()
+            idleUi.inlineSuggestionsBar.setScrollableViews(views)
+        }
+        isInlineSuggestionPresent = true
+        evalIdleUiState()
+        return true
+    }
+
+    @RequiresApi(Build.VERSION_CODES.R)
+    private suspend fun inflateInlineContentView(suggestion: InlineSuggestion): InlineContentView? {
+        return suspendCoroutine { c ->
+            // callback view might be null
+            suggestion.inflate(context, suggestionSize, directExecutor) { v ->
+                c.resume(v)
+            }
+        }
+    }
+
+    companion object {
+        const val HEIGHT = 40
+    }
+
+    fun onKeyboardLayoutSwitched(isNumber: Boolean) {
+        isKeyboardLayoutNumber = isNumber
+        evalIdleUiState()
+    }
+
 }

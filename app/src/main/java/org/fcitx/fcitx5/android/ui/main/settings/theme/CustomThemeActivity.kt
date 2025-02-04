@@ -1,52 +1,83 @@
+/*
+ * SPDX-License-Identifier: LGPL-2.1-or-later
+ * SPDX-FileCopyrightText: Copyright 2021-2023 Fcitx5 for Android Contributors
+ */
 package org.fcitx.fcitx5.android.ui.main.settings.theme
 
 import android.annotation.SuppressLint
-import android.app.Activity
+import android.app.AlertDialog
 import android.content.Context
 import android.content.Intent
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
-import android.graphics.Color
 import android.graphics.Rect
 import android.graphics.drawable.BitmapDrawable
+import android.net.Uri
 import android.os.Bundle
 import android.os.Parcelable
+import android.view.Menu
 import android.view.MenuItem
 import android.view.View
-import android.view.ViewOutlineProvider
+import android.view.ViewGroup
 import android.webkit.MimeTypeMap
 import android.widget.SeekBar
 import androidx.activity.addCallback
+import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.ActivityResultLauncher
 import androidx.activity.result.contract.ActivityResultContract
 import androidx.annotation.StringRes
 import androidx.appcompat.app.AppCompatActivity
-import androidx.core.net.toUri
+import androidx.appcompat.widget.Toolbar
+import androidx.core.view.ViewCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.updateLayoutParams
 import androidx.lifecycle.lifecycleScope
-import com.canhub.cropper.CropImageContract
-import com.canhub.cropper.CropImageContractOptions
-import com.canhub.cropper.CropImageView
-import com.canhub.cropper.options
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.parcelize.Parcelize
 import org.fcitx.fcitx5.android.R
 import org.fcitx.fcitx5.android.data.theme.Theme
-import org.fcitx.fcitx5.android.data.theme.ThemeManager
+import org.fcitx.fcitx5.android.data.theme.ThemeFilesManager
 import org.fcitx.fcitx5.android.data.theme.ThemePreset
 import org.fcitx.fcitx5.android.ui.common.withLoadingDialog
-import org.fcitx.fcitx5.android.utils.darkenColorFilter
+import org.fcitx.fcitx5.android.ui.main.CropImageActivity.CropContract
+import org.fcitx.fcitx5.android.ui.main.CropImageActivity.CropOption
+import org.fcitx.fcitx5.android.ui.main.CropImageActivity.CropResult
+import org.fcitx.fcitx5.android.utils.DarkenColorFilter
+import org.fcitx.fcitx5.android.utils.item
 import org.fcitx.fcitx5.android.utils.parcelable
 import splitties.dimensions.dp
 import splitties.resources.color
 import splitties.resources.resolveThemeAttribute
 import splitties.resources.styledColor
 import splitties.resources.styledDrawable
-import splitties.views.*
+import splitties.views.backgroundColor
+import splitties.views.bottomPadding
 import splitties.views.dsl.appcompat.switch
-import splitties.views.dsl.constraintlayout.*
-import splitties.views.dsl.core.*
-import splitties.views.dsl.core.styles.AndroidStyles
+import splitties.views.dsl.constraintlayout.above
+import splitties.views.dsl.constraintlayout.before
+import splitties.views.dsl.constraintlayout.below
+import splitties.views.dsl.constraintlayout.bottomOfParent
+import splitties.views.dsl.constraintlayout.centerHorizontally
+import splitties.views.dsl.constraintlayout.constraintLayout
+import splitties.views.dsl.constraintlayout.endOfParent
+import splitties.views.dsl.constraintlayout.lParams
+import splitties.views.dsl.constraintlayout.matchConstraints
+import splitties.views.dsl.constraintlayout.packed
+import splitties.views.dsl.constraintlayout.startOfParent
+import splitties.views.dsl.constraintlayout.topOfParent
+import splitties.views.dsl.constraintlayout.topToTopOf
+import splitties.views.dsl.core.add
+import splitties.views.dsl.core.matchParent
+import splitties.views.dsl.core.seekBar
+import splitties.views.dsl.core.textView
+import splitties.views.dsl.core.view
+import splitties.views.dsl.core.wrapContent
+import splitties.views.dsl.core.wrapInScrollView
+import splitties.views.gravityVerticalCenter
+import splitties.views.horizontalPadding
+import splitties.views.textAppearance
+import splitties.views.topPadding
 import java.io.File
 
 class CustomThemeActivity : AppCompatActivity() {
@@ -69,7 +100,14 @@ class CustomThemeActivity : AppCompatActivity() {
             }
 
         override fun parseResult(resultCode: Int, intent: Intent?): BackgroundResult? =
-            intent?.extras?.parcelable(RESULT)
+            intent?.parcelable(RESULT)
+    }
+
+    private val toolbar by lazy {
+        view(::Toolbar) {
+            backgroundColor = styledColor(android.R.attr.colorPrimary)
+            elevation = dp(4f)
+        }
     }
 
     private lateinit var previewUi: KeyboardPreviewUi
@@ -79,10 +117,10 @@ class CustomThemeActivity : AppCompatActivity() {
             setText(string)
         }
         gravity = gravityVerticalCenter
-        textAppearance = resolveThemeAttribute(androidx.appcompat.R.attr.textAppearanceListItem)
+        textAppearance = resolveThemeAttribute(android.R.attr.textAppearanceListItem)
         horizontalPadding = dp(16)
         if (ripple) {
-            background = styledDrawable(androidx.appcompat.R.attr.selectableItemBackground)
+            background = styledDrawable(android.R.attr.selectableItemBackground)
         }
     }
 
@@ -90,7 +128,10 @@ class CustomThemeActivity : AppCompatActivity() {
         createTextView(R.string.dark_keys, ripple = true)
     }
     private val variantSwitch by lazy {
-        switch { }
+        switch {
+            // Use dark keys by default
+            isChecked = false
+        }
     }
 
     private val brightnessLabel by lazy {
@@ -107,48 +148,6 @@ class CustomThemeActivity : AppCompatActivity() {
 
     private val cropLabel by lazy {
         createTextView(R.string.recrop_image, ripple = true)
-    }
-
-    private val androidStyles by lazy {
-        AndroidStyles(this)
-    }
-    private val cancelButton by lazy {
-        androidStyles.button.borderless {
-            setText(android.R.string.cancel)
-        }
-    }
-    private val finishButton by lazy {
-        androidStyles.button.borderless {
-            setText(android.R.string.ok)
-        }
-    }
-    private val deleteButton by lazy {
-        androidStyles.button.borderless {
-            visibility = View.GONE
-            setText(R.string.delete)
-            setTextColor(color(R.color.red_400))
-        }
-    }
-    private val buttonsBar by lazy {
-        constraintLayout {
-            backgroundColor = styledColor(android.R.attr.colorBackground)
-            outlineProvider = ViewOutlineProvider.BOUNDS
-            elevation = dp(8f)
-            add(cancelButton, lParams(wrapContent, wrapContent) {
-                topOfParent()
-                startOfParent()
-                bottomOfParent()
-            })
-            add(deleteButton, lParams(wrapContent, wrapContent) {
-                after(cancelButton, dp(8))
-                bottomOfParent()
-            })
-            add(finishButton, lParams(wrapContent, wrapContent) {
-                topOfParent()
-                endOfParent()
-                bottomOfParent()
-            })
-        }
     }
 
     private val scrollView by lazy {
@@ -199,12 +198,12 @@ class CustomThemeActivity : AppCompatActivity() {
 
     private val ui by lazy {
         constraintLayout {
-            add(scrollView, lParams {
+            add(toolbar, lParams(matchParent, wrapContent) {
                 topOfParent()
                 centerHorizontally()
-                above(buttonsBar)
             })
-            add(buttonsBar, lParams(matchConstraints, wrapContent) {
+            add(scrollView, lParams {
+                below(toolbar)
                 centerHorizontally()
                 bottomOfParent()
             })
@@ -216,11 +215,11 @@ class CustomThemeActivity : AppCompatActivity() {
     private lateinit var theme: Theme.Custom
 
     private class BackgroundStates {
-        lateinit var launcher: ActivityResultLauncher<CropImageContractOptions>
+        lateinit var launcher: ActivityResultLauncher<CropOption>
         var srcImageExtension: String? = null
         var srcImageBuffer: ByteArray? = null
-        var tempImageFile: File? = null
         var cropRect: Rect? = null
+        var cropRotation: Int = 0
         lateinit var croppedBitmap: Bitmap
         lateinit var filteredDrawable: BitmapDrawable
         lateinit var srcImageFile: File
@@ -240,39 +239,28 @@ class CustomThemeActivity : AppCompatActivity() {
         background: Theme.Custom.CustomBackground,
         darkKeys: Boolean
     ) {
-        theme = if (darkKeys)
-            ThemePreset.TransparentLight.deriveCustomBackground(
-                theme.name,
-                background.croppedFilePath,
-                background.srcFilePath,
-                brightnessSeekBar.progress,
-                background.cropRect
-            ) else
-            ThemePreset.TransparentDark.deriveCustomBackground(
-                theme.name,
-                background.croppedFilePath,
-                background.srcFilePath,
-                brightnessSeekBar.progress,
-                background.cropRect
-            )
+        val template = if (darkKeys) ThemePreset.TransparentLight else ThemePreset.TransparentDark
+        theme = template.deriveCustomBackground(
+            theme.name,
+            background.croppedFilePath,
+            background.srcFilePath,
+            brightnessSeekBar.progress,
+            background.cropRect,
+            background.cropRotation
+        )
         previewUi.setTheme(theme, filteredDrawable)
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        cancelButton.setOnClickListener {
-            cancel()
-        }
-        finishButton.setOnClickListener {
-            done()
-        }
         // recover from bundle
-        val originTheme = intent?.extras?.parcelable<Theme.Custom>(ORIGIN_THEME)?.also { t ->
+        val originTheme = intent?.parcelable<Theme.Custom>(ORIGIN_THEME)?.also { t ->
             theme = t
             whenHasBackground {
                 croppedImageFile = File(it.croppedFilePath)
                 srcImageFile = File(it.srcFilePath)
                 cropRect = it.cropRect
+                cropRotation = it.cropRotation
                 croppedBitmap = BitmapFactory.decodeFile(it.croppedFilePath)
                 filteredDrawable = BitmapDrawable(resources, croppedBitmap)
             }
@@ -280,25 +268,74 @@ class CustomThemeActivity : AppCompatActivity() {
         }
         // create new
         if (originTheme == null) {
-            val (n, c, s) = ThemeManager.newCustomBackgroundImages()
+            val (n, c, s) = ThemeFilesManager.newCustomBackgroundImages()
             backgroundStates.apply {
                 croppedImageFile = c
                 srcImageFile = s
             }
-            theme =
-                (if (variantSwitch.isChecked) ThemePreset.TransparentLight else ThemePreset.TransparentDark)
-                    .deriveCustomBackground(n, c.path, s.path)
+            // Use dark keys by default
+            theme = ThemePreset.TransparentDark.deriveCustomBackground(n, c.path, s.path)
         }
         previewUi = KeyboardPreviewUi(this, theme)
-        whenHasBackground {
+        if (theme.backgroundImage == null) {
+            brightnessLabel.visibility = View.GONE
+            cropLabel.visibility = View.GONE
+            variantLabel.visibility = View.GONE
+            variantSwitch.visibility = View.GONE
+            brightnessSeekBar.visibility = View.GONE
+        }
+        enableEdgeToEdge()
+        ViewCompat.setOnApplyWindowInsetsListener(ui) { _, windowInsets ->
+            val statusBars = windowInsets.getInsets(WindowInsetsCompat.Type.statusBars())
+            val navBars = windowInsets.getInsets(WindowInsetsCompat.Type.navigationBars())
+            ui.updateLayoutParams<ViewGroup.MarginLayoutParams> {
+                leftMargin = navBars.left
+                rightMargin = navBars.right
+            }
+            toolbar.topPadding = statusBars.top
+            scrollView.bottomPadding = navBars.bottom
+            windowInsets
+        }
+        // show Activity label on toolbar
+        setSupportActionBar(toolbar)
+        // show back button
+        supportActionBar!!.setDisplayHomeAsUpEnabled(true)
+        setContentView(ui)
+        whenHasBackground { background ->
+            brightnessSeekBar.progress = background.brightness
+            variantSwitch.isChecked = !theme.isDark
+            launcher = registerForActivityResult(CropContract()) {
+                when (it) {
+                    CropResult.Fail -> {
+                        if (newCreated) {
+                            cancel()
+                        }
+                    }
+                    is CropResult.Success -> {
+                        if (newCreated) {
+                            srcImageExtension = MimeTypeMap.getSingleton()
+                                .getExtensionFromMimeType(contentResolver.getType(it.srcUri))
+                            srcImageBuffer =
+                                contentResolver.openInputStream(it.srcUri)!!
+                                    .use { x -> x.readBytes() }
+                        }
+                        cropRect = it.rect
+                        cropRotation = it.rotation
+                        croppedBitmap = it.bitmap
+                        filteredDrawable = BitmapDrawable(resources, croppedBitmap)
+                        updateState()
+                    }
+                }
+            }
             cropLabel.setOnClickListener {
                 launchCrop(previewUi.intrinsicWidth, previewUi.intrinsicHeight)
             }
             variantLabel.setOnClickListener {
                 variantSwitch.isChecked = !variantSwitch.isChecked
             }
+            // attach OnCheckedChangeListener after calling setChecked (isChecked in kotlin)
             variantSwitch.setOnCheckedChangeListener { _, isChecked ->
-                setKeyVariant(it, darkKeys = isChecked)
+                setKeyVariant(background, darkKeys = isChecked)
             }
             brightnessSeekBar.setOnSeekBarChangeListener(object :
                 SeekBar.OnSeekBarChangeListener {
@@ -310,43 +347,6 @@ class CustomThemeActivity : AppCompatActivity() {
                 }
             })
         }
-        if (theme.backgroundImage == null) {
-            brightnessLabel.visibility = View.GONE
-            cropLabel.visibility = View.GONE
-            variantLabel.visibility = View.GONE
-            variantSwitch.visibility = View.GONE
-            brightnessSeekBar.visibility = View.GONE
-        }
-        setContentView(ui)
-        whenHasBackground { background ->
-            brightnessSeekBar.progress = background.brightness
-            variantSwitch.isChecked = !theme.isDark
-            launcher = registerForActivityResult(CropImageContract()) {
-                if (!it.isSuccessful) {
-                    if (newCreated)
-                        cancel()
-                    else
-                        return@registerForActivityResult
-                } else {
-                    if (newCreated) {
-                        srcImageExtension = MimeTypeMap.getSingleton()
-                            .getExtensionFromMimeType(contentResolver.getType(it.originalUri!!))
-                        srcImageBuffer =
-                            contentResolver.openInputStream(it.originalUri!!)!!
-                                .use { x -> x.readBytes() }
-                    }
-                    cropRect = it.cropRect!!
-                    croppedBitmap = Bitmap.createScaledBitmap(
-                        it.getBitmap(this@CustomThemeActivity)!!,
-                        previewUi.intrinsicWidth,
-                        previewUi.intrinsicHeight,
-                        true
-                    )
-                    filteredDrawable = BitmapDrawable(resources, croppedBitmap)
-                    updateState()
-                }
-            }
-        }
 
         if (newCreated) {
             cropLabel.visibility = View.GONE
@@ -356,10 +356,6 @@ class CustomThemeActivity : AppCompatActivity() {
                 }
             }
         } else {
-            deleteButton.apply {
-                visibility = View.VISIBLE
-                setOnClickListener { delete() }
-            }
             whenHasBackground {
                 updateState()
             }
@@ -371,37 +367,32 @@ class CustomThemeActivity : AppCompatActivity() {
     }
 
     private fun BackgroundStates.launchCrop(w: Int, h: Int) {
-        if (tempImageFile == null || tempImageFile?.exists() != true) {
-            tempImageFile = File.createTempFile("cropped", ".png", cacheDir)
+        if (newCreated) {
+            launcher.launch(CropOption.New(w, h))
+        } else {
+            launcher.launch(
+                CropOption.Edit(
+                    width = w,
+                    height = h,
+                    Uri.fromFile(srcImageFile),
+                    initialRect = cropRect,
+                    initialRotation = cropRotation
+                )
+            )
         }
-        launcher.launch(options(srcImageFile.takeIf { it.exists() }?.toUri()) {
-            setInitialCropWindowRectangle(cropRect)
-            setGuidelines(CropImageView.Guidelines.ON_TOUCH)
-            setBorderLineColor(Color.WHITE)
-            setBorderLineThickness(dp(1f))
-            setBorderCornerColor(Color.WHITE)
-            setBorderCornerOffset(0f)
-            setImageSource(includeGallery = true, includeCamera = false)
-            setAspectRatio(w, h)
-            setOutputUri(tempImageFile!!.toUri())
-            setOutputCompressFormat(Bitmap.CompressFormat.PNG)
-        })
     }
 
     @SuppressLint("SetTextI18n")
     private fun BackgroundStates.updateState() {
         val progress = brightnessSeekBar.progress
         brightnessValue.text = "$progress%"
-        filteredDrawable.colorFilter = darkenColorFilter(100 - progress)
+        filteredDrawable.colorFilter = DarkenColorFilter(100 - progress)
         previewUi.setBackground(filteredDrawable)
     }
 
     private fun cancel() {
-        whenHasBackground {
-            tempImageFile?.delete()
-        }
         setResult(
-            Activity.RESULT_CANCELED,
+            RESULT_CANCELED,
             Intent().apply { putExtra(RESULT, null as BackgroundResult?) }
         )
         finish()
@@ -411,7 +402,6 @@ class CustomThemeActivity : AppCompatActivity() {
         lifecycleScope.withLoadingDialog(this) {
             whenHasBackground {
                 withContext(Dispatchers.IO) {
-                    tempImageFile?.delete()
                     croppedImageFile.delete()
                     croppedImageFile.outputStream().use {
                         croppedBitmap.compress(Bitmap.CompressFormat.PNG, 100, it)
@@ -430,14 +420,15 @@ class CustomThemeActivity : AppCompatActivity() {
                 }
             }
             setResult(
-                Activity.RESULT_OK,
+                RESULT_OK,
                 Intent().apply {
                     var newTheme = theme
                     whenHasBackground {
                         newTheme = theme.copy(
                             backgroundImage = it.copy(
                                 brightness = brightnessSeekBar.progress,
-                                cropRect = cropRect
+                                cropRect = cropRect,
+                                cropRotation = cropRotation
                             )
                         )
                     }
@@ -455,12 +446,37 @@ class CustomThemeActivity : AppCompatActivity() {
 
     private fun delete() {
         setResult(
-            Activity.RESULT_OK,
+            RESULT_OK,
             Intent().apply {
                 putExtra(RESULT, BackgroundResult.Deleted(theme.name))
             }
         )
         finish()
+    }
+
+    private fun promptDelete() {
+        AlertDialog.Builder(this)
+            .setTitle(R.string.delete_theme)
+            .setMessage(getString(R.string.delete_theme_msg, theme.name))
+            .setPositiveButton(android.R.string.ok) { _, _ ->
+                delete()
+            }
+            .setNegativeButton(android.R.string.cancel, null)
+            .show()
+    }
+
+    override fun onCreateOptionsMenu(menu: Menu): Boolean {
+        if (!newCreated) {
+            val iconTint = color(R.color.red_400)
+            menu.item(R.string.save, R.drawable.ic_baseline_delete_24, iconTint, true) {
+                promptDelete()
+            }
+        }
+        val iconTint = styledColor(android.R.attr.colorControlNormal)
+        menu.item(R.string.save, R.drawable.ic_baseline_check_24, iconTint, true) {
+            done()
+        }
+        return true
     }
 
     override fun onOptionsItemSelected(item: MenuItem) = when (item.itemId) {

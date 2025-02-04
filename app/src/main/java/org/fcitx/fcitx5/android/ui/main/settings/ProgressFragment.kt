@@ -1,3 +1,7 @@
+/*
+ * SPDX-License-Identifier: LGPL-2.1-or-later
+ * SPDX-FileCopyrightText: Copyright 2021-2023 Fcitx5 for Android Contributors
+ */
 package org.fcitx.fcitx5.android.ui.main.settings
 
 import android.os.Bundle
@@ -22,8 +26,6 @@ abstract class ProgressFragment : Fragment() {
 
     abstract suspend fun initialize(): View
 
-    open fun beforeCreateView() {}
-
     protected val viewModel: MainViewModel by activityViewModels()
 
     protected val fcitx
@@ -34,7 +36,6 @@ abstract class ProgressFragment : Fragment() {
         container: ViewGroup?,
         savedInstanceState: Bundle?
     ): View {
-        beforeCreateView()
         return requireContext().frameLayout().also { root = it }
     }
 

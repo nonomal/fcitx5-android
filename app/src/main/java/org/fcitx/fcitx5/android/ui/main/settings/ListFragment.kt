@@ -1,3 +1,7 @@
+/*
+ * SPDX-License-Identifier: LGPL-2.1-or-later
+ * SPDX-FileCopyrightText: Copyright 2021-2023 Fcitx5 for Android Contributors
+ */
 package org.fcitx.fcitx5.android.ui.main.settings
 
 import android.app.AlertDialog
@@ -28,12 +32,11 @@ class ListFragment : Fragment() {
 
     private val viewModel: MainViewModel by activityViewModels()
 
+    private var uiInitialized = false
+
     private val ui: BaseDynamicListUi<*> by lazy {
-
         val ctx = requireContext()
-
         when (descriptor) {
-
             is ConfigDescriptor.ConfigEnumList -> {
                 val d = descriptor as ConfigDescriptor.ConfigEnumList
                 val available = d.entries.toSet()
@@ -46,7 +49,6 @@ class ListFragment : Fragment() {
                     show = { d.entriesI18n?.get(d.entries.indexOf(it)) ?: it }
                 )
             }
-
             is ConfigDescriptor.ConfigList -> {
                 val ty = descriptor.type as ConfigType.TyList
                 when (ty.subtype) {
@@ -119,6 +121,9 @@ class ListFragment : Fragment() {
                 }
             }
             else -> throw IllegalArgumentException("$descriptor is not a list-like descriptor")
+        }.also {
+            it.setViewModel(viewModel)
+            uiInitialized = true
         }
     }
 
@@ -128,22 +133,22 @@ class ListFragment : Fragment() {
         savedInstanceState: Bundle?
     ): View = ui.root
 
-    override fun onResume() {
-        super.onResume()
+    override fun onStart() {
+        super.onStart()
         viewModel.setToolbarTitle(descriptor.description ?: descriptor.name)
-        viewModel.disableToolbarSaveButton()
-        viewModel.enableToolbarEditButton {
-            ui.enterMultiSelect(
-                requireActivity().onBackPressedDispatcher,
-                viewModel
-            )
+        if (uiInitialized) {
+            viewModel.enableToolbarEditButton(ui.entries.isNotEmpty()) {
+                ui.enterMultiSelect(requireActivity().onBackPressedDispatcher)
+            }
         }
     }
 
-    override fun onPause() {
-        ui.exitMultiSelect(viewModel)
+    override fun onStop() {
         viewModel.disableToolbarEditButton()
-        super.onPause()
+        if (uiInitialized) {
+            ui.exitMultiSelect()
+        }
+        super.onStop()
     }
 
     override fun onDestroy() {

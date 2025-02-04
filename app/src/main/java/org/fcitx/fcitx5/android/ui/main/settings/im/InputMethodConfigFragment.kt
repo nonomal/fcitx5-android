@@ -1,3 +1,7 @@
+/*
+ * SPDX-License-Identifier: LGPL-2.1-or-later
+ * SPDX-FileCopyrightText: Copyright 2021-2023 Fcitx5 for Android Contributors
+ */
 package org.fcitx.fcitx5.android.ui.main.settings.im
 
 import org.fcitx.fcitx5.android.core.FcitxAPI
@@ -8,19 +12,7 @@ class InputMethodConfigFragment : FcitxPreferenceFragment() {
     override fun getPageTitle(): String = requireStringArg(ARG_NAME)
 
     override suspend fun obtainConfig(fcitx: FcitxAPI): RawConfig {
-        val im = requireStringArg(ARG_UNIQUE_NAME)
-        val raw = fcitx.getImConfig(im)
-        if (im == "pinyin") {
-            // hide Shuangpin related options in Pinyin config UI
-            val desc = raw["desc"]
-            desc.findByName("PinyinEngineConfig")?.apply {
-                subItems = subItems?.filter { !it.name.contains("Shuangpin") }?.toTypedArray()
-            }
-            desc.findByName("Fuzzy\$FuzzyConfig")?.apply {
-                subItems = subItems?.filter { it.name != "PartialSp" }?.toTypedArray()
-            }
-        }
-        return raw
+        return fcitx.getImConfig(requireStringArg(ARG_UNIQUE_NAME))
     }
 
     override suspend fun saveConfig(fcitx: FcitxAPI, newConfig: RawConfig) {

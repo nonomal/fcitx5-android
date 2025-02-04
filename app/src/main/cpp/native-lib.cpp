@@ -1,11 +1,18 @@
+/*
+ * SPDX-License-Identifier: LGPL-2.1-or-later
+ * SPDX-FileCopyrightText: Copyright 2021-2024 Fcitx5 for Android Contributors
+ */
 #include <jni.h>
+
+#include <sys/stat.h>
 
 #include <memory>
 #include <future>
+#include <fstream>
 
 #include <android/log.h>
 
-#include <event2/event.h>
+#include <uv.h>
 
 #include <fcitx/instance.h>
 #include <fcitx/addonmanager.h>
@@ -18,16 +25,26 @@
 #include <fcitx-utils/i18n.h>
 #include <fcitx-utils/event.h>
 #include <fcitx-utils/eventdispatcher.h>
+#include <fcitx-utils/standardpath.h>
 #include <fcitx-utils/stringutils.h>
+#include <fcitx-config/iniparser.h>
 
 #include <quickphrase_public.h>
 #include <unicode_public.h>
 #include <clipboard_public.h>
 
+#include <libime/pinyin/pinyindictionary.h>
+#include <libime/table/tablebaseddictionary.h>
+
+#include <boost/iostreams/device/file_descriptor.hpp>
+#include <boost/iostreams/stream_buffer.hpp>
+#include "customphrase.h"
+
 #include "androidfrontend/androidfrontend_public.h"
 #include "jni-utils.h"
 #include "nativestreambuf.h"
 #include "helper-types.h"
+#include "object-conversion.h"
 
 
 class Fcitx {
@@ -54,19 +71,17 @@ public:
         return p_instance != nullptr && p_dispatcher != nullptr && p_frontend != nullptr;
     }
 
-    event_base *get_event_base() {
+    uv_loop_t *get_event_base() {
         fcitx::EventLoop &event_loop = p_instance->eventLoop();
-        return static_cast<event_base *>(event_loop.nativeHandle());
+        return static_cast<uv_loop_t *>(event_loop.nativeHandle());
     }
 
     int loopOnce() {
-        return event_base_loop(get_event_base(), EVLOOP_ONCE);
+        return uv_run(get_event_base(), UV_RUN_ONCE);
     }
 
     void startup(const std::function<void(fcitx::AddonInstance *)> &setupCallback) {
-        char arg0[] = "";
-        char *argv[] = {arg0};
-        p_instance = std::make_unique<fcitx::Instance>(FCITX_ARRAY_SIZE(argv), argv);
+        p_instance = std::make_unique<fcitx::Instance>(0, nullptr);
         p_instance->addonManager().registerDefaultLoader(nullptr);
         p_dispatcher = std::make_unique<fcitx::EventDispatcher>();
         p_dispatcher->attach(&p_instance->eventLoop());
@@ -131,28 +146,23 @@ public:
             const auto *entry = imMgr.entry(ime.name());
             entries.emplace_back(entry);
         }
-        return std::move(entries);
+        return entries;
     }
 
-    typedef std::tuple<const fcitx::InputMethodEntry *, const std::vector<std::string>> IMStatus;
-
-    IMStatus inputMethodStatus() {
+    std::unique_ptr<InputMethodStatus> inputMethodStatus() {
         auto *ic = p_frontend->call<fcitx::IAndroidFrontend::activeInputContext>();
-        auto *engine = p_instance->inputMethodEngine(ic);
-        const auto *entry = p_instance->inputMethodEntry(ic);
-        if (engine) {
-            auto subMode = engine->subMode(*entry, *ic);
-            auto subModeLabel = engine->subModeLabel(*entry, *ic);
-            auto subModeIcon = engine->subModeIcon(*entry, *ic);
-            return std::make_tuple(entry, std::vector{subMode, subModeLabel, subModeIcon});
-        } else if (entry) {
-            return std::make_tuple(entry, std::vector<std::string>{});
-        }
-        return std::make_tuple(nullptr, std::vector<std::string>{});
+        if (!ic) return nullptr;
+        auto *entry = p_instance->inputMethodEntry(ic);
+        auto *engine = static_cast<fcitx::InputMethodEngine *>(p_instance->addonManager().addon(entry->addon(), true));
+        return std::make_unique<InputMethodStatus>(entry, engine, ic);
     }
 
     void setInputMethod(const std::string &ime) {
-        p_instance->setCurrentInputMethod(ime);
+        auto *ic = p_frontend->call<fcitx::IAndroidFrontend::activeInputContext>();
+        if (!ic) return;
+        // this method remembers input method for each InputContext,
+        // while Instance::setCurrentInputMethod(std::string) doesn't
+        p_instance->setCurrentInputMethod(ic, ime, true);
     }
 
     std::vector<const fcitx::InputMethodEntry *> availableInputMethods() {
@@ -161,7 +171,7 @@ public:
             entries.emplace_back(&entry);
             return true;
         });
-        return std::move(entries);
+        return entries;
     }
 
     void setEnabledInputMethods(std::vector<std::string> &entries) {
@@ -273,14 +283,15 @@ public:
         engine->setConfigForInputMethod(*entry, config);
     }
 
-    std::map<const fcitx::AddonInfo *, bool> getAddons() {
+    std::vector<AddonStatus> getAddons() {
         auto &globalConfig = p_instance->globalConfig();
         auto &addonManager = p_instance->addonManager();
         const auto &enabledAddons = globalConfig.enabledAddons();
-        std::unordered_set<std::string> enabledSet(enabledAddons.begin(), enabledAddons.end());
+        const std::unordered_set<std::string> enabledSet(enabledAddons.begin(), enabledAddons.end());
         const auto &disabledAddons = globalConfig.disabledAddons();
-        std::unordered_set<std::string> disabledSet(disabledAddons.begin(), disabledAddons.end());
-        std::map<const fcitx::AddonInfo *, bool> addons;
+        const std::unordered_set<std::string>
+                disabledSet(disabledAddons.begin(), disabledAddons.end());
+        std::vector<AddonStatus> addons;
         for (const auto category: {fcitx::AddonCategory::InputMethod,
                                    fcitx::AddonCategory::Frontend,
                                    fcitx::AddonCategory::Loader,
@@ -298,7 +309,7 @@ public:
                 } else if (enabledSet.count(info->uniqueName())) {
                     enabled = true;
                 }
-                addons.insert({info, enabled});
+                addons.emplace_back(info, enabled);
             }
         }
         return addons;
@@ -337,7 +348,7 @@ public:
 
     void triggerQuickPhrase() {
         if (!p_quickphrase) return;
-        auto *ic = p_instance->inputContextManager().lastFocusedInputContext();
+        auto *ic = p_frontend->call<fcitx::IAndroidFrontend::activeInputContext>();
         if (!ic) return;
         p_quickphrase->call<fcitx::IQuickPhrase::trigger>(
                 ic, "", "", "", "", fcitx::Key{FcitxKey_None}
@@ -346,14 +357,14 @@ public:
 
     void triggerUnicode() {
         if (!p_unicode) return;
-        auto *ic = p_instance->inputContextManager().lastFocusedInputContext();
+        auto *ic = p_frontend->call<fcitx::IAndroidFrontend::activeInputContext>();
         if (!ic) return;
         p_unicode->call<fcitx::IUnicode::trigger>(ic);
     }
 
-    void setClipboard(const std::string &string) {
+    void setClipboard(const std::string &string, bool password) {
         if (!p_clipboard) return;
-        p_clipboard->call<fcitx::IClipboard::setClipboard>("", string);
+        p_clipboard->call<fcitx::IClipboard::setClipboardV2>("", string, password);
     }
 
     void focusInputContext(bool focus) {
@@ -361,9 +372,9 @@ public:
         p_frontend->call<fcitx::IAndroidFrontend::focusInputContext>(focus);
     }
 
-    void activateInputContext(int uid) {
+    void activateInputContext(int uid, const std::string &pkgName) {
         if (!p_frontend) return;
-        p_frontend->call<fcitx::IAndroidFrontend::activateInputContext>(uid);
+        p_frontend->call<fcitx::IAndroidFrontend::activateInputContext>(uid, pkgName);
     }
 
     void deactivateInputContext(int uid) {
@@ -384,7 +395,7 @@ public:
                           fcitx::StatusGroup::InputMethod,
                           fcitx::StatusGroup::AfterInputMethod}) {
             for (auto act: ic->statusArea().actions(group)) {
-                actions.emplace_back(ActionEntity(act, ic));
+                actions.emplace_back(act, ic);
             }
         }
         return actions;
@@ -398,13 +409,37 @@ public:
         action->activate(ic);
     }
 
+    std::vector<std::string> getCandidates(int offset, int limit) {
+        return p_frontend->call<fcitx::IAndroidFrontend::getCandidates>(offset, limit);
+    }
+
+    std::vector<CandidateActionEntity> getCandidateActions(int idx) {
+        auto actions = std::vector<CandidateActionEntity>();
+        for (const auto &a: p_frontend->call<fcitx::IAndroidFrontend::getCandidateActions>(idx)) {
+            actions.emplace_back(a);
+        }
+        return actions;
+    }
+
+    void triggerCandidateAction(int idx, int actionIdx) {
+        return p_frontend->call<fcitx::IAndroidFrontend::triggerCandidateAction>(idx, actionIdx);
+    }
+
+    void setCandidatePagingMode(int mode) {
+        return p_frontend->call<fcitx::IAndroidFrontend::setCandidatePagingMode>(mode);
+    }
+
+    void offsetCandidatePage(int delta) {
+        return p_frontend->call<fcitx::IAndroidFrontend::offsetCandidatePage>(delta);
+    }
+
     void save() {
         p_instance->save();
     }
 
     void exit() {
         // Make sure that the exec doesn't get blocked
-        event_base_loopexit(get_event_base(), nullptr);
+        uv_stop(get_event_base());
         // Normally, we would use exec to drive the event loop.
         // Since we are calling loopOnce in JVM repeatedly, we shouldn't have used this function.
         // However, exit events would lose chance to be called in this case.
@@ -437,7 +472,6 @@ private:
     }
 };
 
-
 #define DO_IF_NOT_RUNNING(expr) \
     if (!Fcitx::Instance().isRunning()) { \
         FCITX_WARN() << "Fcitx is not running!"; \
@@ -446,7 +480,7 @@ private:
 #define RETURN_IF_NOT_RUNNING DO_IF_NOT_RUNNING(return)
 #define RETURN_VALUE_IF_NOT_RUNNING(v) DO_IF_NOT_RUNNING(return (v))
 
-static GlobalRefSingleton *GlobalRef;
+GlobalRefSingleton *GlobalRef;
 
 JNIEXPORT jint JNICALL
 JNI_OnLoad(JavaVM *jvm, void * /* reserved */) {
@@ -454,6 +488,9 @@ JNI_OnLoad(JavaVM *jvm, void * /* reserved */) {
     // return supported JNI version; or it will crash
     return JNI_VERSION_1_6;
 }
+
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wunused-parameter"
 
 extern "C"
 JNIEXPORT void JNICALL
@@ -463,44 +500,21 @@ Java_org_fcitx_fcitx5_android_core_Fcitx_setupLogStream(JNIEnv *env, jclass claz
     Fcitx::setLogStream(stream, verbose);
 }
 
-jobject fcitxInputMethodEntryWithSubModeToJObject(JNIEnv *env, const fcitx::InputMethodEntry *entry, const std::vector<std::string> &subMode);
-
-jobject fcitxActionToJObject(JNIEnv *env, const ActionEntity &act) {
-    jobjectArray menu = nullptr;
-    if (act.menu) {
-        const int size = static_cast<int>(act.menu->size());
-        menu = env->NewObjectArray(size, GlobalRef->Action, nullptr);
-        for (int i = 0; i < size; i++) {
-            env->SetObjectArrayElement(menu, i, fcitxActionToJObject(env, act.menu->at(i)));
-        }
-    }
-    auto obj = env->NewObject(GlobalRef->Action, GlobalRef->ActionInit,
-                              act.id,
-                              act.isSeparator,
-                              act.isCheckable,
-                              act.isChecked,
-                              *JString(env, act.name),
-                              *JString(env, act.icon),
-                              *JString(env, act.shortText),
-                              *JString(env, act.longText),
-                              menu
-    );
-    if (menu) {
-        env->DeleteLocalRef(menu);
-    }
-    return obj;
-}
-
 extern "C"
 JNIEXPORT void JNICALL
-Java_org_fcitx_fcitx5_android_core_Fcitx_startupFcitx(JNIEnv *env, jclass clazz, jstring locale, jstring appData, jstring appLib, jstring extData, jstring extCache) {
+Java_org_fcitx_fcitx5_android_core_Fcitx_startupFcitx(
+        JNIEnv *env, jclass clazz,
+        jstring locale,
+        jstring appData,
+        jstring appLib,
+        jstring extData,
+        jstring extCache,
+        jobjectArray extDomains) {
     if (Fcitx::Instance().isRunning()) {
         FCITX_ERROR() << "Fcitx is already running!";
         return;
     }
     FCITX_INFO() << "Starting...";
-
-    setenv("SKIP_FCITX_PATH", "true", 1);
 
     auto locale_ = CString(env, locale);
     auto appData_ = CString(env, appData);
@@ -508,25 +522,27 @@ Java_org_fcitx_fcitx5_android_core_Fcitx_startupFcitx(JNIEnv *env, jclass clazz,
     auto extData_ = CString(env, extData);
     auto extCache_ = CString(env, extCache);
 
-    std::string lang_ = fcitx::stringutils::split(*locale_, ":")[0];
-    std::string config_home = fcitx::stringutils::joinPath(*extData_, "config");
-    std::string data_home = fcitx::stringutils::joinPath(*extData_, "data");
-    std::string usr_share = fcitx::stringutils::joinPath(*appData_, "usr", "share");
-    std::string locale_dir = fcitx::stringutils::joinPath(usr_share, "locale");
-    std::string libime_data = fcitx::stringutils::joinPath(usr_share, "libime");
-    std::string lua_path = fcitx::stringutils::concat(
+    const std::string lang_ = fcitx::stringutils::split(*locale_, ":")[0];
+    const std::string config_home = fcitx::stringutils::joinPath(*extData_, "config");
+    const std::string data_home = fcitx::stringutils::joinPath(*extData_, "data");
+    const std::string usr_share = fcitx::stringutils::joinPath(*appData_, "usr", "share");
+    const std::string locale_dir = fcitx::stringutils::joinPath(usr_share, "locale");
+    const std::string libime_data = fcitx::stringutils::joinPath(usr_share, "libime");
+    const std::string lua_path = fcitx::stringutils::concat(
             fcitx::stringutils::joinPath(data_home, "lua", "?.lua"), ";",
             fcitx::stringutils::joinPath(data_home, "lua", "?", "init.lua"), ";",
             fcitx::stringutils::joinPath(usr_share, "lua", "5.4", "?.lua"), ";",
             fcitx::stringutils::joinPath(usr_share, "lua", "5.4", "?", "init.lua"), ";",
             ";" // double semicolon, for default path defined in luaconf.h
     );
-    std::string lua_cpath = fcitx::stringutils::concat(
+    const std::string lua_cpath = fcitx::stringutils::concat(
             fcitx::stringutils::joinPath(data_home, "lua", "?.so"), ";",
             fcitx::stringutils::joinPath(usr_share, "lua", "5.4", "?.so"), ";",
             ";"
     );
 
+    // prevent StandardPath from resolving it's hardcoded installation path
+    setenv("SKIP_FCITX_PATH", "1", 1);
     // for fcitx default profile [DefaultInputMethod]
     setenv("LANG", lang_.c_str(), 1);
     // for libintl-lite loading gettext .mo translations
@@ -557,40 +573,49 @@ Java_org_fcitx_fcitx5_android_core_Fcitx_startupFcitx(JNIEnv *env, jclass clazz,
 
     const char *locale_dir_char = locale_dir.c_str();
     fcitx::registerDomain("fcitx5", locale_dir_char);
-    fcitx::registerDomain("fcitx5-chinese-addons", locale_dir_char);
     fcitx::registerDomain("fcitx5-lua", locale_dir_char);
-    fcitx::registerDomain("fcitx5-unikey", locale_dir_char);
+    fcitx::registerDomain("fcitx5-chinese-addons", locale_dir_char);
     fcitx::registerDomain("fcitx5-android", locale_dir_char);
 
-    auto candidateListCallback = [](const std::vector<std::string> &candidateList) {
+    const int extDomainsSize = env->GetArrayLength(extDomains);
+    for (int i = 0; i < extDomainsSize; i++) {
+        auto domain = JRef<jstring>(env, env->GetObjectArrayElement(extDomains, i));
+        fcitx::registerDomain(CString(env, domain), locale_dir_char);
+    }
+
+    auto candidateListCallback = [](const std::vector<std::string> &candidates, const int size) {
         auto env = GlobalRef->AttachEnv();
-        auto vararg = JRef<jobjectArray>(env, env->NewObjectArray(static_cast<int>(candidateList.size()), GlobalRef->String, nullptr));
+        auto candidatesArray = JRef<jobjectArray>(env, env->NewObjectArray(static_cast<int>(candidates.size()), GlobalRef->String, nullptr));
         int i = 0;
-        for (const auto &s: candidateList) {
-            env->SetObjectArrayElement(vararg, i++, JString(env, s));
+        for (const auto &s: candidates) {
+            env->SetObjectArrayElement(candidatesArray, i++, JString(env, s));
         }
+        auto vararg = JRef<jobjectArray>(env, env->NewObjectArray(2, GlobalRef->Object, nullptr));
+        auto candidatesCount = JRef(env, env->NewObject(GlobalRef->Integer, GlobalRef->IntegerInit, size));
+        env->SetObjectArrayElement(vararg, 0, *candidatesCount);
+        env->SetObjectArrayElement(vararg, 1, *candidatesArray);
         env->CallStaticVoidMethod(GlobalRef->Fcitx, GlobalRef->HandleFcitxEvent, 0, *vararg);
     };
-    auto commitStringCallback = [](const std::string &str) {
+    auto commitStringCallback = [](const std::string &str, const int cursor) {
         auto env = GlobalRef->AttachEnv();
-        auto vararg = JRef<jobjectArray>(env, env->NewObjectArray(1, GlobalRef->String, nullptr));
+        auto stringCursor = JRef(env, env->NewObject(GlobalRef->Integer, GlobalRef->IntegerInit, cursor));
+        auto vararg = JRef<jobjectArray>(env, env->NewObjectArray(2, GlobalRef->Object, nullptr));
         env->SetObjectArrayElement(vararg, 0, JString(env, str));
+        env->SetObjectArrayElement(vararg, 1, stringCursor);
         env->CallStaticVoidMethod(GlobalRef->Fcitx, GlobalRef->HandleFcitxEvent, 1, *vararg);
     };
-    auto preeditCallback = [](const std::string &preedit, const int cursor, const std::string &clientPreedit, const int clientCursor) {
+    auto preeditCallback = [](const fcitx::Text &clientPreedit) {
         auto env = GlobalRef->AttachEnv();
-        auto vararg = JRef<jobjectArray>(env, env->NewObjectArray(4, GlobalRef->Object, nullptr));
-        env->SetObjectArrayElement(vararg, 0, JString(env, preedit));
-        env->SetObjectArrayElement(vararg, 1, env->NewObject(GlobalRef->Integer, GlobalRef->IntegerInit, cursor));
-        env->SetObjectArrayElement(vararg, 2, JString(env, clientPreedit));
-        env->SetObjectArrayElement(vararg, 3, env->NewObject(GlobalRef->Integer, GlobalRef->IntegerInit, clientCursor));
+        auto vararg = JRef<jobjectArray>(env, env->NewObjectArray(1, GlobalRef->FormattedText, nullptr));
+        env->SetObjectArrayElement(vararg, 0, fcitxTextToJObject(env, clientPreedit));
         env->CallStaticVoidMethod(GlobalRef->Fcitx, GlobalRef->HandleFcitxEvent, 2, *vararg);
     };
-    auto inputPanelAuxCallback = [](const std::string &auxUp, const std::string &auxDown) {
+    auto inputPanelAuxCallback = [](const fcitx::Text &preedit, const fcitx::Text &auxUp, const fcitx::Text &auxDown) {
         auto env = GlobalRef->AttachEnv();
-        auto vararg = JRef<jobjectArray>(env, env->NewObjectArray(2, GlobalRef->String, nullptr));
-        env->SetObjectArrayElement(vararg, 0, JString(env, auxUp));
-        env->SetObjectArrayElement(vararg, 1, JString(env, auxDown));
+        auto vararg = JRef<jobjectArray>(env, env->NewObjectArray(3, GlobalRef->FormattedText, nullptr));
+        env->SetObjectArrayElement(vararg, 0, fcitxTextToJObject(env, preedit));
+        env->SetObjectArrayElement(vararg, 1, fcitxTextToJObject(env, auxUp));
+        env->SetObjectArrayElement(vararg, 2, fcitxTextToJObject(env, auxDown));
         env->CallStaticVoidMethod(GlobalRef->Fcitx, GlobalRef->HandleFcitxEvent, 3, *vararg);
     };
     auto readyCallback = []() {
@@ -609,24 +634,71 @@ Java_org_fcitx_fcitx5_android_core_Fcitx_startupFcitx(JNIEnv *env, jclass clazz,
         env->CallStaticVoidMethod(GlobalRef->Fcitx, GlobalRef->HandleFcitxEvent, 5, *vararg);
     };
     auto imChangeCallback = []() {
+        std::unique_ptr<InputMethodStatus> status = Fcitx::Instance().inputMethodStatus();
+        if (!status) return;
         auto env = GlobalRef->AttachEnv();
         auto vararg = JRef<jobjectArray>(env, env->NewObjectArray(1, GlobalRef->Object, nullptr));
-        const auto status = Fcitx::Instance().inputMethodStatus();
-        auto obj = JRef(env, fcitxInputMethodEntryWithSubModeToJObject(env, std::get<0>(status), std::get<1>(status)));
+        auto obj = JRef(env, fcitxInputMethodStatusToJObject(env, *status));
         env->SetObjectArrayElement(vararg, 0, obj);
         env->CallStaticVoidMethod(GlobalRef->Fcitx, GlobalRef->HandleFcitxEvent, 6, *vararg);
     };
     auto statusAreaUpdateCallback = []() {
+        std::unique_ptr<InputMethodStatus> status = Fcitx::Instance().inputMethodStatus();
+        if (!status) return;
         auto env = GlobalRef->AttachEnv();
+        auto vararg = JRef<jobjectArray>(env, env->NewObjectArray(static_cast<int>(2), GlobalRef->Object, nullptr));
         const auto actions = Fcitx::Instance().statusAreaActions();
-        auto vararg = JRef<jobjectArray>(env, env->NewObjectArray(static_cast<int>(actions.size()), GlobalRef->Action, nullptr));
+        auto actionArray = JRef<jobjectArray>(env, env->NewObjectArray(static_cast<int>(actions.size()), GlobalRef->Action, nullptr));
         int i = 0;
         for (const auto &a: actions) {
             auto obj = JRef(env, fcitxActionToJObject(env, a));
-            env->SetObjectArrayElement(vararg, i++, obj);
+            env->SetObjectArrayElement(actionArray, i++, obj);
         }
+        env->SetObjectArrayElement(vararg, 0, actionArray);
+        auto statusObj = JRef(env, fcitxInputMethodStatusToJObject(env, *status));
+        env->SetObjectArrayElement(vararg, 1, statusObj);
         env->CallStaticVoidMethod(GlobalRef->Fcitx, GlobalRef->HandleFcitxEvent, 7, *vararg);
     };
+    auto deleteSurroundingCallback = [](const int before, const int after) {
+        std::array<int, 2> arr{before, after};
+        auto env = GlobalRef->AttachEnv();
+        auto vararg = JRef<jobjectArray>(env, env->NewObjectArray(1, GlobalRef->Object, nullptr));
+        auto intArray = JRef<jintArray>(env, env->NewIntArray(2));
+        env->SetIntArrayRegion(intArray, 0, 2, arr.data());
+        env->SetObjectArrayElement(vararg, 0, intArray);
+        env->CallStaticVoidMethod(GlobalRef->Fcitx, GlobalRef->HandleFcitxEvent, 8, *vararg);
+    };
+    auto pagedCandidateCallback = [](const PagedCandidateEntity &paged) {
+        auto env = GlobalRef->AttachEnv();
+        const int size = static_cast<int>(paged.candidates.size());
+        if (size == 0) {
+            auto vararg = JRef<jobjectArray>(env, env->NewObjectArray(0, GlobalRef->Object, nullptr));
+            env->CallStaticVoidMethod(GlobalRef->Fcitx, GlobalRef->HandleFcitxEvent, 9, *vararg);
+            return;
+        }
+        auto candidatesArray = JRef<jobjectArray>(env, env->NewObjectArray(size, GlobalRef->Candidate, nullptr));
+        for (int i = 0; i < size; ++i) {
+            env->SetObjectArrayElement(candidatesArray, i, candidateEntityToObject(env, paged.candidates[i]));
+        }
+        auto cursorIndex = JRef(env, env->NewObject(GlobalRef->Integer, GlobalRef->IntegerInit, paged.cursorIndex));
+        auto layoutHint = JRef(env, env->NewObject(GlobalRef->Integer, GlobalRef->IntegerInit, static_cast<int>(paged.layoutHint)));
+        auto hasPrev = JRef(env, env->NewObject(GlobalRef->Boolean, GlobalRef->BooleanInit, paged.hasPrev));
+        auto hasNext = JRef(env, env->NewObject(GlobalRef->Boolean, GlobalRef->BooleanInit, paged.hasNext));
+        auto vararg = JRef<jobjectArray>(env, env->NewObjectArray(5, GlobalRef->Object, nullptr));
+        env->SetObjectArrayElement(vararg, 0, candidatesArray);
+        env->SetObjectArrayElement(vararg, 1, cursorIndex);
+        env->SetObjectArrayElement(vararg, 2, layoutHint);
+        env->SetObjectArrayElement(vararg, 3, hasPrev);
+        env->SetObjectArrayElement(vararg, 4, hasNext);
+        env->CallStaticVoidMethod(GlobalRef->Fcitx, GlobalRef->HandleFcitxEvent, 9, *vararg);
+    };
+    auto toastCallback = [](const std::string &s) {
+        auto env = GlobalRef->AttachEnv();
+        env->CallStaticVoidMethod(GlobalRef->Fcitx, GlobalRef->ShowToast, *JString(env, s));
+    };
+
+    umask(007);
+    fcitx::StandardPath::global().syncUmask();
 
     Fcitx::Instance().startup([&](auto *androidfrontend) {
         FCITX_INFO() << "Setting up callback";
@@ -638,6 +710,9 @@ Java_org_fcitx_fcitx5_android_core_Fcitx_startupFcitx(JNIEnv *env, jclass clazz,
         androidfrontend->template call<fcitx::IAndroidFrontend::setKeyEventCallback>(keyEventCallback);
         androidfrontend->template call<fcitx::IAndroidFrontend::setInputMethodChangeCallback>(imChangeCallback);
         androidfrontend->template call<fcitx::IAndroidFrontend::setStatusAreaUpdateCallback>(statusAreaUpdateCallback);
+        androidfrontend->template call<fcitx::IAndroidFrontend::setDeleteSurroundingCallback>(deleteSurroundingCallback);
+        androidfrontend->template call<fcitx::IAndroidFrontend::setPagedCandidateCallback>(pagedCandidateCallback);
+        androidfrontend->template call<fcitx::IAndroidFrontend::setToastCallback>(toastCallback);
     });
     FCITX_INFO() << "Finishing startup";
 }
@@ -672,28 +747,31 @@ Java_org_fcitx_fcitx5_android_core_Fcitx_reloadFcitxConfig(JNIEnv *env, jclass c
 
 extern "C"
 JNIEXPORT void JNICALL
-Java_org_fcitx_fcitx5_android_core_Fcitx_sendKeyToFcitxString(JNIEnv *env, jclass clazz, jstring key, jint state, jboolean up, jint timestamp) {
+Java_org_fcitx_fcitx5_android_core_Fcitx_sendKeyToFcitxString(JNIEnv *env, jclass clazz, jstring key, jint state, jint code, jboolean up, jint timestamp) {
     RETURN_IF_NOT_RUNNING
     fcitx::Key parsedKey{fcitx::Key::keySymFromString(CString(env, key)),
-                         fcitx::KeyStates(static_cast<uint32_t>(state))};
+                         fcitx::KeyStates(static_cast<uint32_t>(state)),
+                         code + /* evdev offset */ 8};
     Fcitx::Instance().sendKey(parsedKey, up, timestamp);
 }
 
 extern "C"
 JNIEXPORT void JNICALL
-Java_org_fcitx_fcitx5_android_core_Fcitx_sendKeyToFcitxChar(JNIEnv *env, jclass clazz, jchar c, jint state, jboolean up, jint timestamp) {
+Java_org_fcitx_fcitx5_android_core_Fcitx_sendKeyToFcitxChar(JNIEnv *env, jclass clazz, jchar c, jint state, jint code, jboolean up, jint timestamp) {
     RETURN_IF_NOT_RUNNING
-    fcitx::Key parsedKey{fcitx::Key::keySymFromString((const char *) &c),
-                         fcitx::KeyStates(static_cast<uint32_t>(state))};
+    const fcitx::Key parsedKey{fcitx::Key::keySymFromString(reinterpret_cast<const char *>(&c)),
+                               fcitx::KeyStates(static_cast<uint32_t>(state)),
+                               code + /* evdev offset */ 8};
     Fcitx::Instance().sendKey(parsedKey, up, timestamp);
 }
 
 extern "C"
 JNIEXPORT void JNICALL
-Java_org_fcitx_fcitx5_android_core_Fcitx_sendKeySymToFcitx(JNIEnv *env, jclass clazz, jint sym, jint state, jboolean up, jint timestamp) {
+Java_org_fcitx_fcitx5_android_core_Fcitx_sendKeySymToFcitx(JNIEnv *env, jclass clazz, jint sym, jint state, jint code, jboolean up, jint timestamp) {
     RETURN_IF_NOT_RUNNING
     fcitx::Key key{fcitx::KeySym(static_cast<uint32_t>(sym)),
-                   fcitx::KeyStates(static_cast<uint32_t>(state))};
+                   fcitx::KeyStates(static_cast<uint32_t>(state)),
+                   code + /* evdev offset */ 8};
     Fcitx::Instance().sendKey(key, up, timestamp);
 }
 
@@ -701,7 +779,6 @@ extern "C"
 JNIEXPORT jboolean JNICALL
 Java_org_fcitx_fcitx5_android_core_Fcitx_selectCandidate(JNIEnv *env, jclass clazz, jint idx) {
     RETURN_VALUE_IF_NOT_RUNNING(false)
-    FCITX_DEBUG() << "selectCandidate: #" << idx;
     return Fcitx::Instance().select(idx);
 }
 
@@ -740,28 +817,6 @@ Java_org_fcitx_fcitx5_android_core_Fcitx_nextInputMethod(JNIEnv *env, jclass cla
     Fcitx::Instance().nextInputMethod(forward == JNI_TRUE);
 }
 
-jobject fcitxInputMethodEntryToJObject(JNIEnv *env, const fcitx::InputMethodEntry *entry) {
-    return env->NewObject(GlobalRef->InputMethodEntry, GlobalRef->InputMethodEntryInit,
-                          *JString(env, entry->uniqueName()),
-                          *JString(env, entry->name()),
-                          *JString(env, entry->icon()),
-                          *JString(env, entry->nativeName()),
-                          *JString(env, entry->label()),
-                          *JString(env, entry->languageCode()),
-                          entry->isConfigurable()
-    );
-}
-
-jobjectArray fcitxInputMethodEntriesToJObjectArray(JNIEnv *env, const std::vector<const fcitx::InputMethodEntry *> &entries) {
-    jobjectArray array = env->NewObjectArray(static_cast<int>(entries.size()), GlobalRef->InputMethodEntry, nullptr);
-    int i = 0;
-    for (const auto &entry: entries) {
-        auto obj = JRef(env, fcitxInputMethodEntryToJObject(env, entry));
-        env->SetObjectArrayElement(array, i++, obj);
-    }
-    return array;
-}
-
 extern "C"
 JNIEXPORT jobjectArray JNICALL
 Java_org_fcitx_fcitx5_android_core_Fcitx_listInputMethods(JNIEnv *env, jclass clazz) {
@@ -770,29 +825,13 @@ Java_org_fcitx_fcitx5_android_core_Fcitx_listInputMethods(JNIEnv *env, jclass cl
     return fcitxInputMethodEntriesToJObjectArray(env, entries);
 }
 
-jobject fcitxInputMethodEntryWithSubModeToJObject(JNIEnv *env, const fcitx::InputMethodEntry *entry, const std::vector<std::string> &subMode) {
-    if (!entry) return nullptr;
-    if (subMode.empty()) return fcitxInputMethodEntryToJObject(env, entry);
-    return env->NewObject(GlobalRef->InputMethodEntry, GlobalRef->InputMethodEntryInitWithSubMode,
-                          *JString(env, entry->uniqueName()),
-                          *JString(env, entry->name()),
-                          *JString(env, entry->icon()),
-                          *JString(env, entry->nativeName()),
-                          *JString(env, entry->label()),
-                          *JString(env, entry->languageCode()),
-                          entry->isConfigurable(),
-                          *JString(env, subMode[0]),
-                          *JString(env, subMode[1]),
-                          *JString(env, subMode[2])
-    );
-}
-
 extern "C"
 JNIEXPORT jobject JNICALL
 Java_org_fcitx_fcitx5_android_core_Fcitx_inputMethodStatus(JNIEnv *env, jclass clazz) {
     RETURN_VALUE_IF_NOT_RUNNING(nullptr)
-    const auto &status = Fcitx::Instance().inputMethodStatus();
-    return fcitxInputMethodEntryWithSubModeToJObject(env, std::get<0>(status), std::get<1>(status));
+    auto status = Fcitx::Instance().inputMethodStatus();
+    if (!status) return nullptr;
+    return fcitxInputMethodStatusToJObject(env, *status);
 }
 
 extern "C"
@@ -821,25 +860,6 @@ Java_org_fcitx_fcitx5_android_core_Fcitx_setEnabledInputMethods(JNIEnv *env, jcl
         entries.emplace_back(CString(env, string));
     }
     Fcitx::Instance().setEnabledInputMethods(entries);
-}
-
-jobject fcitxRawConfigToJObject(JNIEnv *env, const fcitx::RawConfig &cfg) {
-    jobject obj = env->NewObject(GlobalRef->RawConfig, GlobalRef->RawConfigInit,
-                                 *JString(env, cfg.name()),
-                                 *JString(env, cfg.comment()),
-                                 *JString(env, cfg.value()),
-                                 nullptr);
-    if (!cfg.hasSubItems()) {
-        return obj;
-    }
-    auto array = JRef<jobjectArray>(env, env->NewObjectArray(static_cast<int>(cfg.subItemsSize()), GlobalRef->RawConfig, nullptr));
-    int i = 0;
-    for (const auto &item: cfg.subItems()) {
-        auto jItem = JRef(env, fcitxRawConfigToJObject(env, *cfg.get(item)));
-        env->SetObjectArrayElement(array, i++, jItem);
-    }
-    env->CallVoidMethod(obj, GlobalRef->RawConfigSetSubItems, *array);
-    return obj;
 }
 
 extern "C"
@@ -874,28 +894,6 @@ Java_org_fcitx_fcitx5_android_core_Fcitx_getFcitxInputMethodConfig(JNIEnv *env, 
     return result ? fcitxRawConfigToJObject(env, *result) : nullptr;
 }
 
-void jobjectFillRawConfig(JNIEnv *env, jobject jConfig, fcitx::RawConfig &config) {
-    auto subItems = JRef<jobjectArray>(env, env->GetObjectField(jConfig, GlobalRef->RawConfigSubItems));
-    if (*subItems == nullptr) {
-        auto value = JRef<jstring>(env, env->GetObjectField(jConfig, GlobalRef->RawConfigValue));
-        config = CString(env, value);
-    } else {
-        int size = env->GetArrayLength(subItems);
-        for (int i = 0; i < size; i++) {
-            auto item = JRef(env, env->GetObjectArrayElement(subItems, i));
-            auto name = JRef<jstring>(env, env->GetObjectField(item, GlobalRef->RawConfigName));
-            auto subConfig = config.get(CString(env, name), true);
-            jobjectFillRawConfig(env, item, *subConfig);
-        }
-    }
-}
-
-fcitx::RawConfig jobjectToRawConfig(JNIEnv *env, jobject jConfig) {
-    fcitx::RawConfig config;
-    jobjectFillRawConfig(env, jConfig, config);
-    return config;
-}
-
 extern "C"
 JNIEXPORT void JNICALL
 Java_org_fcitx_fcitx5_android_core_Fcitx_setFcitxGlobalConfig(JNIEnv *env, jclass clazz, jobject config) {
@@ -928,15 +926,6 @@ Java_org_fcitx_fcitx5_android_core_Fcitx_setFcitxInputMethodConfig(JNIEnv *env, 
     Fcitx::Instance().setInputMethodConfig(CString(env, im), rawConfig);
 }
 
-jobjectArray stringVectorToJStringArray(JNIEnv *env, const std::vector<std::string> &strings) {
-    jobjectArray array = env->NewObjectArray(static_cast<int>(strings.size()), GlobalRef->String, nullptr);
-    int i = 0;
-    for (const auto &s: strings) {
-        env->SetObjectArrayElement(array, i++, JString(env, s));
-    }
-    return array;
-}
-
 extern "C"
 JNIEXPORT jobjectArray JNICALL
 Java_org_fcitx_fcitx5_android_core_Fcitx_getFcitxAddons(JNIEnv *env, jclass clazz) {
@@ -945,19 +934,7 @@ Java_org_fcitx_fcitx5_android_core_Fcitx_getFcitxAddons(JNIEnv *env, jclass claz
     jobjectArray array = env->NewObjectArray(static_cast<int>(addons.size()), GlobalRef->AddonInfo, nullptr);
     int i = 0;
     for (const auto addon: addons) {
-        const auto *info = addon.first;
-        auto obj = JRef(env, env->NewObject(GlobalRef->AddonInfo, GlobalRef->AddonInfoInit,
-                                            *JString(env, info->uniqueName()),
-                                            *JString(env, info->name().match()),
-                                            *JString(env, info->comment().match()),
-                                            static_cast<int32_t>(info->category()),
-                                            info->isConfigurable(),
-                                            addon.second,
-                                            info->isDefaultEnabled(),
-                                            info->onDemand(),
-                                            stringVectorToJStringArray(env, info->dependencies()),
-                                            stringVectorToJStringArray(env, info->optionalDependencies())
-        ));
+        auto obj = JRef(env, fcitxAddonStatusToJObject(env, addon));
         env->SetObjectArrayElement(array, i++, obj);
     }
     return array;
@@ -986,6 +963,7 @@ Java_org_fcitx_fcitx5_android_core_Fcitx_setFcitxAddonState(JNIEnv *env, jclass 
 extern "C"
 JNIEXPORT void JNICALL
 Java_org_fcitx_fcitx5_android_core_Fcitx_triggerQuickPhraseInput(JNIEnv *env, jclass clazz) {
+    RETURN_IF_NOT_RUNNING
     Fcitx::Instance().triggerQuickPhrase();
 }
 
@@ -998,9 +976,9 @@ Java_org_fcitx_fcitx5_android_core_Fcitx_triggerUnicodeInput(JNIEnv *env, jclass
 
 extern "C"
 JNIEXPORT void JNICALL
-Java_org_fcitx_fcitx5_android_core_Fcitx_setFcitxClipboard(JNIEnv *env, jclass clazz, jstring string) {
+Java_org_fcitx_fcitx5_android_core_Fcitx_setFcitxClipboard(JNIEnv *env, jclass clazz, jstring string, jboolean password) {
     RETURN_IF_NOT_RUNNING
-    Fcitx::Instance().setClipboard(CString(env, string));
+    Fcitx::Instance().setClipboard(CString(env, string), password == JNI_TRUE);
 }
 
 extern "C"
@@ -1012,9 +990,9 @@ Java_org_fcitx_fcitx5_android_core_Fcitx_focusInputContext(JNIEnv *env, jclass c
 
 extern "C"
 JNIEXPORT void JNICALL
-Java_org_fcitx_fcitx5_android_core_Fcitx_activateInputContext(JNIEnv *env, jclass clazz, jint uid) {
+Java_org_fcitx_fcitx5_android_core_Fcitx_activateInputContext(JNIEnv *env, jclass clazz, jint uid, jstring pkg_name) {
     RETURN_IF_NOT_RUNNING
-    Fcitx::Instance().activateInputContext(uid);
+    Fcitx::Instance().activateInputContext(uid, CString(env, pkg_name));
 }
 
 extern "C"
@@ -1036,8 +1014,9 @@ JNIEXPORT jobjectArray JNICALL
 Java_org_fcitx_fcitx5_android_core_Fcitx_getFcitxStatusAreaActions(JNIEnv *env, jclass clazz) {
     RETURN_VALUE_IF_NOT_RUNNING(nullptr)
     const auto actions = Fcitx::Instance().statusAreaActions();
-    jobjectArray array = env->NewObjectArray(static_cast<int>(actions.size()), GlobalRef->Action, nullptr);
-    for (int i = 0; i < actions.size(); i++) {
+    int size = static_cast<int>(actions.size());
+    jobjectArray array = env->NewObjectArray(size, GlobalRef->Action, nullptr);
+    for (int i = 0; i < size; i++) {
         auto obj = JRef(env, fcitxActionToJObject(env, actions[i]));
         env->SetObjectArrayElement(array, i, obj);
     }
@@ -1049,6 +1028,55 @@ JNIEXPORT void JNICALL
 Java_org_fcitx_fcitx5_android_core_Fcitx_activateUserInterfaceAction(JNIEnv *env, jclass clazz, jint id) {
     RETURN_IF_NOT_RUNNING
     Fcitx::Instance().activateAction(static_cast<int>(id));
+}
+
+extern "C"
+JNIEXPORT jobjectArray JNICALL
+Java_org_fcitx_fcitx5_android_core_Fcitx_getFcitxCandidates(JNIEnv *env, jclass clazz, jint offset, jint limit) {
+    RETURN_VALUE_IF_NOT_RUNNING(nullptr)
+    auto candidates = Fcitx::Instance().getCandidates(static_cast<int>(offset), static_cast<int>(limit));
+    int size = static_cast<int>(candidates.size());
+    jobjectArray array = env->NewObjectArray(size, GlobalRef->String, nullptr);
+    for (int i = 0; i < size; i++) {
+        auto str = JString(env, candidates[i]);
+        env->SetObjectArrayElement(array, i, str);
+    }
+    return array;
+}
+
+extern "C"
+JNIEXPORT jobjectArray JNICALL
+Java_org_fcitx_fcitx5_android_core_Fcitx_getFcitxCandidateActions(JNIEnv *env, jclass clazz, jint idx) {
+    RETURN_VALUE_IF_NOT_RUNNING(nullptr)
+    auto actions = Fcitx::Instance().getCandidateActions(idx);
+    int size = static_cast<int>(actions.size());
+    jobjectArray array = env->NewObjectArray(size, GlobalRef->CandidateAction, nullptr);
+    for (int i = 0; i < size; i++) {
+        auto obj = JRef(env, fcitxCandidateActionToObject(env, actions[i]));
+        env->SetObjectArrayElement(array, i, obj);
+    }
+    return array;
+}
+
+extern "C"
+JNIEXPORT void JNICALL
+Java_org_fcitx_fcitx5_android_core_Fcitx_triggerFcitxCandidateAction(JNIEnv *env, jclass clazz, jint idx, jint action_idx) {
+    RETURN_IF_NOT_RUNNING
+    Fcitx::Instance().triggerCandidateAction(idx, action_idx);
+}
+
+extern "C"
+JNIEXPORT void JNICALL
+Java_org_fcitx_fcitx5_android_core_Fcitx_setFcitxCandidatePagingMode(JNIEnv *env, jclass clazz, jint mode) {
+    RETURN_IF_NOT_RUNNING
+    Fcitx::Instance().setCandidatePagingMode(mode);
+}
+
+extern "C"
+JNIEXPORT void JNICALL
+Java_org_fcitx_fcitx5_android_core_Fcitx_offsetFcitxCandidatePage(JNIEnv *env, jclass clazz, jint delta) {
+    RETURN_IF_NOT_RUNNING
+    Fcitx::Instance().offsetCandidatePage(delta);
 }
 
 extern "C"
@@ -1091,3 +1119,140 @@ Java_org_fcitx_fcitx5_android_core_Key_create(JNIEnv *env, jclass clazz, jint sy
             *JString(env, key.toString(fcitx::KeyStringFormat::Localized))
     );
 }
+
+extern "C"
+JNIEXPORT void JNICALL
+Java_org_fcitx_fcitx5_android_data_pinyin_PinyinDictManager_pinyinDictConv(JNIEnv *env, jclass clazz, jstring src, jstring dest, jboolean mode) {
+    using namespace libime;
+    PinyinDictionary dict;
+    try {
+        dict.load(PinyinDictionary::SystemDict, *CString(env, src),
+                  mode == JNI_TRUE ? PinyinDictFormat::Binary : PinyinDictFormat::Text);
+        std::ofstream out;
+        out.open(*CString(env, dest), std::ios::out | std::ios::binary);
+        dict.save(PinyinDictionary::SystemDict, out,
+                  mode == JNI_TRUE ? PinyinDictFormat::Text : PinyinDictFormat::Binary);
+    } catch (const std::exception &e) {
+        throwJavaException(env, e.what());
+    }
+}
+
+extern "C"
+JNIEXPORT void JNICALL
+Java_org_fcitx_fcitx5_android_data_table_TableManager_tableDictConv(JNIEnv *env, jclass clazz, jstring src, jstring dest, jboolean mode) {
+    using namespace libime;
+    TableBasedDictionary dict;
+    try {
+        dict.load(*CString(env, src), mode == JNI_TRUE ? TableFormat::Binary : TableFormat::Text);
+        std::ofstream out;
+        out.open(*CString(env, dest), std::ios::out | std::ios::binary);
+        dict.save(out, mode == JNI_TRUE ? TableFormat::Text : TableFormat::Binary);
+    } catch (const std::exception &e) {
+        throwJavaException(env, e.what());
+    }
+}
+
+extern "C"
+JNIEXPORT jboolean JNICALL
+Java_org_fcitx_fcitx5_android_data_table_TableManager_checkTableDictFormat(JNIEnv *env, jclass clazz, jstring src, jboolean user) {
+    using namespace libime;
+    TableBasedDictionary dict;
+    try {
+        if (user == JNI_TRUE) {
+            dict.loadUser(CString(env, src), TableFormat::Binary);
+        } else {
+            dict.load(*CString(env, src), TableFormat::Binary);
+        }
+    } catch (const std::exception &e) {
+        throwJavaException(env, e.what());
+    }
+    return JNI_TRUE;
+}
+
+extern "C"
+JNIEXPORT jobjectArray JNICALL
+Java_org_fcitx_fcitx5_android_data_pinyin_CustomPhraseManager_load(JNIEnv *env, jclass clazz) {
+    auto fp = fcitx::StandardPath::global().open(fcitx::StandardPath::Type::PkgData, "pinyin/customphrase", O_RDONLY);
+    if (fp.fd() < 0) {
+        FCITX_INFO() << "cannot open pinyin/customphrase";
+        return nullptr;
+    }
+    boost::iostreams::stream_buffer<boost::iostreams::file_descriptor_source>
+            buffer(fp.fd(), boost::iostreams::file_descriptor_flags::never_close_handle);
+    std::istream in(&buffer);
+    fcitx::CustomPhraseDict dict;
+    dict.load(in, true);
+    int size = 0;
+    dict.foreach([&](const std::string &key, std::vector<fcitx::CustomPhrase> &items) {
+        FCITX_UNUSED(key);
+        size += static_cast<int>(items.size());
+    });
+    int i = 0;
+    jobjectArray array = env->NewObjectArray(size, GlobalRef->PinyinCustomPhrase, nullptr);
+    dict.foreach([&](const std::string &key, std::vector<fcitx::CustomPhrase> &items) {
+        for (const auto &item: items) {
+            env->SetObjectArrayElement(array, i++,
+                                       JRef(env, env->NewObject(GlobalRef->PinyinCustomPhrase, GlobalRef->PinyinCustomPhraseInit,
+                                                                *JString(env, key),
+                                                                item.order(),
+                                                                *JString(env, item.value())
+                                            )
+                                       )
+            );
+        }
+    });
+    return array;
+}
+
+extern "C"
+JNIEXPORT void JNICALL
+Java_org_fcitx_fcitx5_android_data_pinyin_CustomPhraseManager_save(JNIEnv *env, jclass clazz, jobjectArray items) {
+    fcitx::CustomPhraseDict dict;
+    const int size = env->GetArrayLength(items);
+    for (int i = 0; i < size; i++) {
+        auto phrase = JRef(env, env->GetObjectArrayElement(items, i));
+        auto phraseKey = JRef<jstring>(env, env->GetObjectField(phrase, GlobalRef->PinyinCustomPhraseKey));
+        auto phraseOrder = env->GetIntField(phrase, GlobalRef->PinyinCustomPhraseOrder);
+        auto phraseValue = JRef<jstring>(env, env->GetObjectField(phrase, GlobalRef->PinyinCustomPhraseValue));
+        dict.addPhrase(*CString(env, phraseKey),
+                       *CString(env, phraseValue),
+                       static_cast<int>(phraseOrder));
+    }
+    fcitx::StandardPath::global().safeSave(
+            fcitx::StandardPath::Type::PkgData, "pinyin/customphrase",
+            [&](int fd) {
+                boost::iostreams::stream_buffer<boost::iostreams::file_descriptor_sink>
+                        buffer(fd, boost::iostreams::file_descriptor_flags::never_close_handle);
+                std::ostream out(&buffer);
+                dict.save(out);
+                return true;
+            });
+}
+
+extern "C"
+JNIEXPORT jobject JNICALL
+Java_org_fcitx_fcitx5_android_utils_Ini_readFromIni(JNIEnv *env, jclass clazz, jstring src) {
+    fcitx::RawConfig config;
+    FILE *fp = std::fopen(*CString(env, src), "rb");
+    if (!fp) {
+        return nullptr;
+    }
+    fcitx::readFromIni(config, fp);
+    std::fclose(fp);
+    return fcitxRawConfigToJObject(env, config);
+}
+
+extern "C"
+JNIEXPORT void JNICALL
+Java_org_fcitx_fcitx5_android_utils_Ini_writeAsIni(JNIEnv *env, jclass clazz, jstring dest, jobject value) {
+    FILE *fp = std::fopen(*CString(env, dest), "wb");
+    if (!fp) {
+        throwJavaException(env, "Unable to open file");
+        return;
+    }
+    auto config = jobjectToRawConfig(env, value);
+    fcitx::writeAsIni(config, fp);
+    std::fclose(fp);
+}
+
+#pragma GCC diagnostic pop

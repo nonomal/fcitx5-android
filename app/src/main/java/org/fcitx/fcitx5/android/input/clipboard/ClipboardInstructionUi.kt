@@ -1,22 +1,34 @@
+/*
+ * SPDX-License-Identifier: LGPL-2.1-or-later
+ * SPDX-FileCopyrightText: Copyright 2021-2023 Fcitx5 for Android Contributors
+ */
 package org.fcitx.fcitx5.android.input.clipboard
 
 import android.content.Context
-import android.graphics.PorterDuff
-import android.graphics.PorterDuffColorFilter
 import org.fcitx.fcitx5.android.R
 import org.fcitx.fcitx5.android.data.theme.Theme
 import splitties.dimensions.dp
-import splitties.views.dsl.appcompat.AppCompatStyles
-import splitties.views.dsl.constraintlayout.*
-import splitties.views.dsl.core.*
-import splitties.views.imageResource
+import splitties.resources.drawable
+import splitties.views.dsl.constraintlayout.below
+import splitties.views.dsl.constraintlayout.constraintLayout
+import splitties.views.dsl.constraintlayout.endOfParent
+import splitties.views.dsl.constraintlayout.lParams
+import splitties.views.dsl.constraintlayout.startOfParent
+import splitties.views.dsl.constraintlayout.topOfParent
+import splitties.views.dsl.core.Ui
+import splitties.views.dsl.core.add
+import splitties.views.dsl.core.imageView
+import splitties.views.dsl.core.styles.AndroidStyles
+import splitties.views.dsl.core.textView
+import splitties.views.dsl.core.wrapContent
+import splitties.views.imageDrawable
 import splitties.views.setPaddingDp
 
 sealed class ClipboardInstructionUi(override val ctx: Context, protected val theme: Theme) : Ui {
 
     class Enable(ctx: Context, theme: Theme) : ClipboardInstructionUi(ctx, theme) {
 
-        private val appCompatStyles = AppCompatStyles(ctx)
+        private val androidStyles = AndroidStyles(ctx)
 
         private val instructionText = textView {
             setText(R.string.instruction_enable_clipboard_listening)
@@ -24,7 +36,7 @@ sealed class ClipboardInstructionUi(override val ctx: Context, protected val the
             setTextColor(theme.keyTextColor)
         }
 
-        val enableButton = appCompatStyles.button.borderless {
+        val enableButton = androidStyles.button.borderless {
             setText(R.string.clipboard_enable)
             setTextColor(theme.accentKeyBackgroundColor)
         }
@@ -45,8 +57,9 @@ sealed class ClipboardInstructionUi(override val ctx: Context, protected val the
     class Empty(ctx: Context, theme: Theme) : ClipboardInstructionUi(ctx, theme) {
 
         private val icon = imageView {
-            imageResource = R.drawable.ic_baseline_content_paste_24
-            colorFilter = PorterDuffColorFilter(theme.altKeyTextColor, PorterDuff.Mode.SRC_IN)
+            imageDrawable = drawable(R.drawable.ic_baseline_content_paste_24)!!.apply {
+                setTint(theme.altKeyTextColor)
+            }
         }
 
         private val instructionText = textView {

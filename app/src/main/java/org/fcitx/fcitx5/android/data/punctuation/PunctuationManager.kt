@@ -1,3 +1,7 @@
+/*
+ * SPDX-License-Identifier: LGPL-2.1-or-later
+ * SPDX-FileCopyrightText: Copyright 2021-2023 Fcitx5 for Android Contributors
+ */
 package org.fcitx.fcitx5.android.data.punctuation
 
 import org.fcitx.fcitx5.android.core.FcitxAPI
@@ -8,9 +12,8 @@ import org.fcitx.fcitx5.android.core.savePunctuationConfig
 object PunctuationManager {
 
     fun parseRawConfig(raw: RawConfig): List<PunctuationMapEntry> {
-        return raw.findByName("cfg")
-            ?.run { get(ENTRIES).subItems?.map { PunctuationMapEntry(it) } }
-            ?: listOf()
+        val items = raw.findByName("cfg")?.get(ENTRIES)?.subItems ?: return emptyList()
+        return items.map { PunctuationMapEntry(it) }
     }
 
     suspend fun load(fcitx: FcitxAPI, lang: String): List<PunctuationMapEntry> {

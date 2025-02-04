@@ -1,3 +1,7 @@
+/*
+ * SPDX-License-Identifier: LGPL-2.1-or-later
+ * SPDX-FileCopyrightText: Copyright 2021-2023 Fcitx5 for Android Contributors
+ */
 package org.fcitx.fcitx5.android.ui.main
 
 import androidx.lifecycle.MutableLiveData
@@ -11,7 +15,7 @@ class MainViewModel : ViewModel() {
 
     val toolbarTitle = MutableLiveData(appContext.getString(R.string.app_name))
 
-    val appbarShadow = MutableLiveData(true)
+    val toolbarShadow = MutableLiveData(true)
 
     val toolbarSaveButtonOnClickListener = MutableLiveData<(() -> Unit)?>()
 
@@ -29,12 +33,12 @@ class MainViewModel : ViewModel() {
         toolbarTitle.value = title
     }
 
-    fun enableAppbarShadow() {
-        appbarShadow.value = true
+    fun enableToolbarShadow() {
+        toolbarShadow.value = true
     }
 
-    fun disableAppbarShadow() {
-        appbarShadow.value = false
+    fun disableToolbarShadow() {
+        toolbarShadow.value = false
     }
 
     fun enableToolbarSaveButton(onClick: () -> Unit) {
@@ -45,14 +49,13 @@ class MainViewModel : ViewModel() {
         toolbarSaveButtonOnClickListener.value = null
     }
 
-    fun enableToolbarEditButton(onClick: () -> Unit) {
+    fun enableToolbarEditButton(visible: Boolean = true, onClick: () -> Unit) {
         toolbarEditButtonOnClickListener.value = onClick
-        toolbarEditButtonVisible.value = true
-        showToolbarEditButton()
+        toolbarEditButtonVisible.value = visible
     }
 
     fun disableToolbarEditButton() {
-        toolbarEditButtonVisible.value = false
+        toolbarEditButtonOnClickListener.value = null
         hideToolbarEditButton()
     }
 

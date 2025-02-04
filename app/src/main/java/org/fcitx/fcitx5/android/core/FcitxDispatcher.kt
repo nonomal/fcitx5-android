@@ -1,6 +1,16 @@
+/*
+ * SPDX-License-Identifier: LGPL-2.1-or-later
+ * SPDX-FileCopyrightText: Copyright 2021-2023 Fcitx5 for Android Contributors
+ */
 package org.fcitx.fcitx5.android.core
 
-import kotlinx.coroutines.*
+import kotlinx.coroutines.CoroutineDispatcher
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Runnable
+import kotlinx.coroutines.asCoroutineDispatcher
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import timber.log.Timber
@@ -46,7 +56,6 @@ class FcitxDispatcher(private val controller: FcitxController) : CoroutineDispat
         fun nativeExit()
     }
 
-    private val nativeLoopLock = Mutex()
     private val runningLock = Mutex()
 
     private val queue = ConcurrentLinkedQueue<WrappedRunnable>()
@@ -58,24 +67,22 @@ class FcitxDispatcher(private val controller: FcitxController) : CoroutineDispat
      * This function returns immediately
      */
     fun start() {
+        Timber.d("FcitxDispatcher start()")
         internalScope.launch {
             runningLock.withLock {
-                Timber.i("Start")
                 if (isRunning.compareAndSet(false, true)) {
-                    Timber.d("Calling native startup")
+                    Timber.d("nativeStartup()")
                     controller.nativeStartup()
                     while (isActive && isRunning.get()) {
                         // blocking...
-                        nativeLoopLock.withLock {
-                            controller.nativeLoopOnce()
-                        }
+                        controller.nativeLoopOnce()
                         // do scheduled jobs
                         while (true) {
                             val block = queue.poll() ?: break
                             block.run()
                         }
                     }
-                    Timber.i("Calling native exit")
+                    Timber.i("nativeExit()")
                     controller.nativeExit()
                 }
             }
@@ -90,7 +97,7 @@ class FcitxDispatcher(private val controller: FcitxController) : CoroutineDispat
         Timber.i("FcitxDispatcher stop()")
         return if (isRunning.compareAndSet(true, false)) {
             runBlocking {
-                bypass()
+                controller.nativeScheduleEmpty()
                 runningLock.withLock {
                     val rest = queue.toList()
                     queue.clear()
@@ -100,23 +107,14 @@ class FcitxDispatcher(private val controller: FcitxController) : CoroutineDispat
         } else emptyList()
     }
 
-    private fun dispatchInternal(block: Runnable, name: String? = null): WrappedRunnable {
-        if (!isRunning.get())
-            throw IllegalStateException("Dispatcher is not in running state!")
-        val wrapped = WrappedRunnable(block, name)
-        queue.offer(wrapped)
-        bypass()
-        return wrapped
-    }
-
-    // bypass nativeLoopOnce if no code is executing in native dispatcher
-    private fun bypass() {
-        if (nativeLoopLock.isLocked)
-            controller.nativeScheduleEmpty()
-    }
-
     override fun dispatch(context: CoroutineContext, block: Runnable) {
-        this@FcitxDispatcher.dispatchInternal(block)
+        if (!isRunning.get()) {
+            throw IllegalStateException("Dispatcher is not in running state!")
+        }
+        queue.offer(WrappedRunnable(block))
+        // always call `nativeScheduleEmpty()` to prevent `nativeLoopOnce()` from blocking
+        // the thread when we have something to run
+        controller.nativeScheduleEmpty()
     }
 
     companion object {

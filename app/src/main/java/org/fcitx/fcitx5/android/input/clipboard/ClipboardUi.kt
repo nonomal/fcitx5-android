@@ -1,3 +1,7 @@
+/*
+ * SPDX-License-Identifier: LGPL-2.1-or-later
+ * SPDX-FileCopyrightText: Copyright 2021-2023 Fcitx5 for Android Contributors
+ */
 package org.fcitx.fcitx5.android.input.clipboard
 
 import android.content.Context
@@ -9,10 +13,17 @@ import org.fcitx.fcitx5.android.R
 import org.fcitx.fcitx5.android.data.prefs.AppPrefs
 import org.fcitx.fcitx5.android.data.theme.Theme
 import org.fcitx.fcitx5.android.data.theme.ThemeManager
-import org.fcitx.fcitx5.android.input.bar.ToolButton
+import org.fcitx.fcitx5.android.input.bar.ui.ToolButton
 import splitties.dimensions.dp
 import splitties.views.backgroundColor
-import splitties.views.dsl.core.*
+import splitties.views.dsl.coordinatorlayout.coordinatorLayout
+import splitties.views.dsl.coordinatorlayout.defaultLParams
+import splitties.views.dsl.core.Ui
+import splitties.views.dsl.core.add
+import splitties.views.dsl.core.horizontalLayout
+import splitties.views.dsl.core.lParams
+import splitties.views.dsl.core.matchParent
+import splitties.views.dsl.core.view
 import splitties.views.dsl.recyclerview.recyclerView
 import timber.log.Timber
 
@@ -26,16 +37,20 @@ class ClipboardUi(override val ctx: Context, private val theme: Theme) : Ui {
 
     val emptyUi = ClipboardInstructionUi.Empty(ctx, theme)
 
-    private val keyBorder by ThemeManager.prefs.keyBorder
-    private val disableAnimation by AppPrefs.getInstance().advanced.disableAnimation
-
-    override val root = view(::ViewAnimator) {
-        if (!keyBorder) {
-            backgroundColor = theme.barColor
-        }
+    val viewAnimator =  view(::ViewAnimator) {
         add(recyclerView, lParams(matchParent, matchParent))
         add(emptyUi.root, lParams(matchParent, matchParent))
         add(enableUi.root, lParams(matchParent, matchParent))
+    }
+
+    private val keyBorder by ThemeManager.prefs.keyBorder
+    private val disableAnimation by AppPrefs.getInstance().advanced.disableAnimation
+
+    override val root = coordinatorLayout {
+        if (!keyBorder) {
+            backgroundColor = theme.barColor
+        }
+        add(viewAnimator, defaultLParams(matchParent, matchParent))
     }
 
     val deleteAllButton = ToolButton(ctx, R.drawable.ic_baseline_delete_sweep_24, theme)
@@ -54,15 +69,15 @@ class ClipboardUi(override val ctx: Context, private val theme: Theme) : Ui {
             TransitionManager.beginDelayedTransition(root, Fade().apply { duration = 100L })
         when (state) {
             ClipboardStateMachine.State.Normal -> {
-                root.displayedChild = 0
+                viewAnimator.displayedChild = 0
                 setDeleteButtonShown(true)
             }
             ClipboardStateMachine.State.AddMore -> {
-                root.displayedChild = 1
+                viewAnimator.displayedChild = 1
                 setDeleteButtonShown(false)
             }
             ClipboardStateMachine.State.EnableListening -> {
-                root.displayedChild = 2
+                viewAnimator.displayedChild = 2
                 setDeleteButtonShown(false)
             }
         }

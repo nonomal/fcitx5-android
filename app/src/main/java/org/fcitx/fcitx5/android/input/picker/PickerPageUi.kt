@@ -1,175 +1,156 @@
+/*
+ * SPDX-License-Identifier: LGPL-2.1-or-later
+ * SPDX-FileCopyrightText: Copyright 2021-2025 Fcitx5 for Android Contributors
+ */
 package org.fcitx.fcitx5.android.input.picker
 
+import android.annotation.SuppressLint
 import android.content.Context
-import android.graphics.Rect
-import android.util.TypedValue
+import android.view.View
 import android.view.ViewGroup
+import androidx.constraintlayout.widget.ConstraintLayout
 import androidx.core.view.updateLayoutParams
-import androidx.core.widget.TextViewCompat
 import org.fcitx.fcitx5.android.R
 import org.fcitx.fcitx5.android.core.FcitxKeyMapping
 import org.fcitx.fcitx5.android.core.KeySym
 import org.fcitx.fcitx5.android.data.prefs.AppPrefs
 import org.fcitx.fcitx5.android.data.theme.Theme
-import org.fcitx.fcitx5.android.input.keyboard.*
+import org.fcitx.fcitx5.android.input.AutoScaleTextView
+import org.fcitx.fcitx5.android.input.keyboard.CustomGestureView
 import org.fcitx.fcitx5.android.input.keyboard.CustomGestureView.OnGestureListener
-import org.fcitx.fcitx5.android.input.keyboard.KeyAction.*
+import org.fcitx.fcitx5.android.input.keyboard.ImageKeyView
+import org.fcitx.fcitx5.android.input.keyboard.KeyAction.CommitAction
+import org.fcitx.fcitx5.android.input.keyboard.KeyAction.FcitxKeyAction
+import org.fcitx.fcitx5.android.input.keyboard.KeyAction.SymAction
+import org.fcitx.fcitx5.android.input.keyboard.KeyActionListener
 import org.fcitx.fcitx5.android.input.keyboard.KeyActionListener.Source
+import org.fcitx.fcitx5.android.input.keyboard.KeyDef
 import org.fcitx.fcitx5.android.input.keyboard.KeyDef.Appearance
 import org.fcitx.fcitx5.android.input.keyboard.KeyDef.Appearance.Border
 import org.fcitx.fcitx5.android.input.keyboard.KeyDef.Appearance.Variant
-import org.fcitx.fcitx5.android.input.popup.PopupListener
-import splitties.views.dsl.constraintlayout.*
+import org.fcitx.fcitx5.android.input.keyboard.KeyView
+import org.fcitx.fcitx5.android.input.keyboard.TextKeyView
+import org.fcitx.fcitx5.android.input.popup.PopupAction
+import org.fcitx.fcitx5.android.input.popup.PopupActionListener
+import splitties.views.dsl.constraintlayout.below
+import splitties.views.dsl.constraintlayout.bottomOfParent
+import splitties.views.dsl.constraintlayout.bottomToTopOf
+import splitties.views.dsl.constraintlayout.constraintLayout
+import splitties.views.dsl.constraintlayout.lParams
+import splitties.views.dsl.constraintlayout.leftOfParent
+import splitties.views.dsl.constraintlayout.leftToRightOf
+import splitties.views.dsl.constraintlayout.rightOfParent
+import splitties.views.dsl.constraintlayout.rightToLeftOf
+import splitties.views.dsl.constraintlayout.topOfParent
+import splitties.views.dsl.constraintlayout.topToBottomOf
 import splitties.views.dsl.core.Ui
 import splitties.views.dsl.core.add
 import splitties.views.dsl.core.matchParent
-import splitties.views.gravityCenter
-import splitties.views.lines
 
-class PickerPageUi(override val ctx: Context, val theme: Theme, val density: Density) : Ui {
+class PickerPageUi(
+    override val ctx: Context,
+    theme: Theme,
+    density: Density,
+    bordered: Boolean = false
+) : Ui {
 
     enum class Density(
         val pageSize: Int,
         val columnCount: Int,
         val rowCount: Int,
         val textSize: Float,
+        val autoScale: Boolean,
         val showBackspace: Boolean
     ) {
         // symbol: 10/10/8, backspace on bottom right
-        High(28, 10, 3, 19f, true),
+        High(28, 10, 3, 19f, false, true),
 
         // emoji: 7/7/6, backspace on bottom right
-        Medium(20, 7, 3, 23.7f, true),
+        Medium(20, 7, 3, 23.7f, false, true),
 
         // emoticon: 4/4/4, no backspace
-        Low(12, 4, 3, 19f, false)
+        Low(12, 4, 3, 19f, true, false)
     }
 
     companion object {
-        val BackspaceAppearance = Appearance.Image(
-            src = R.drawable.ic_baseline_backspace_24,
-            variant = Variant.Alternative,
-            border = Border.Off,
-            viewId = R.id.button_backspace
-        )
-
         val BackspaceAction = SymAction(KeySym(FcitxKeyMapping.FcitxKey_BackSpace))
-
         private var popupOnKeyPress by AppPrefs.getInstance().keyboard.popupOnKeyPress
     }
 
     var keyActionListener: KeyActionListener? = null
-    var popupListener: PopupListener? = null
+    var popupActionListener: PopupActionListener? = null
 
     private val keyAppearance = Appearance.Text(
         displayText = "",
         textSize = density.textSize,
         variant = Variant.Normal,
-        border = Border.Off
+        border = if (bordered) Border.On else Border.Off
     )
 
     private val keyViews = Array(density.pageSize) {
         TextKeyView(ctx, theme, keyAppearance).apply {
-            if (density == Density.Low) {
+            if (density.autoScale) {
                 mainText.apply {
-                    lines = 1
-                    gravity = gravityCenter
-                    updateLayoutParams {
-                        width = matchParent
-                        height = matchParent
-                    }
+                    scaleMode = AutoScaleTextView.Mode.Proportional
+                    setPadding(hMargin, vMargin, hMargin, vMargin)
                 }
-                TextViewCompat.setAutoSizeTextTypeUniformWithConfiguration(
-                    mainText, 4, density.textSize.toInt(), 1, TypedValue.COMPLEX_UNIT_SP
-                )
             }
         }
     }
 
-    private val backspaceKey = ImageKeyView(ctx, theme, BackspaceAppearance).apply {
-        setOnClickListener { onBackspaceClick() }
-        repeatEnabled = true
-        onRepeatListener = { onBackspaceClick() }
-    }
+    private val backspaceAppearance = Appearance.Image(
+        src = R.drawable.ic_baseline_backspace_24,
+        variant = Variant.Alternative,
+        border = if (bordered) Border.On else Border.Off,
+        viewId = R.id.button_backspace
+    )
 
-    private fun onBackspaceClick() {
-        keyActionListener?.onKeyAction(BackspaceAction, Source.Keyboard)
+    private val backspaceKey by lazy {
+        val action: (View) -> Unit = {
+            keyActionListener?.onKeyAction(BackspaceAction, Source.Keyboard)
+        }
+        val listener = View.OnClickListener { action.invoke(it) }
+        ImageKeyView(ctx, theme, backspaceAppearance).apply {
+            setOnClickListener(listener)
+            repeatEnabled = true
+            onRepeatListener = action
+        }
     }
 
     override val root = constraintLayout {
         val columnCount = density.columnCount
         val rowCount = density.rowCount
         val keyWidth = 1f / columnCount
-        when (density) {
-            Density.High -> {
-                keyViews.forEachIndexed { i, keyView ->
-                    val row = i / columnCount
-                    val column = i % columnCount
-                    add(keyView, lParams {
-                        // layout_constraintTop_to
-                        if (row == 0) {
-                            // first row, align top to top of parent
-                            topOfParent()
-                        } else {
-                            // not first row, align top to bottom of first view in last row
-                            topToBottomOf(keyViews[(row - 1) * columnCount])
-                        }
-                        // layout_constraintBottom_to
-                        if (row == rowCount - 1) {
-                            // last row, align bottom to bottom of parent
-                            bottomOfParent()
-                        } else {
-                            // not last row, align bottom to top of first view in next row
-                            bottomToTopOf(keyViews[(row + 1) * columnCount])
-                        }
-                        // layout_constraintEnd_to
-                        if (i == keyViews.size - 1) {
-                            // last key (likely not last column), align end to start of backspace button
-                            endToStartOf(backspaceKey)
-                        } else if (column == columnCount - 1) {
-                            // last column, align end to end of parent
-                            endOfParent()
-                        } else {
-                            // neither, align end to start of next view
-                            endToStartOf(keyViews[i + 1])
-                        }
-                        matchConstraintPercentWidth = keyWidth
-                    })
+        keyViews.forEachIndexed { i, keyView ->
+            val row = i / columnCount
+            val column = i % columnCount
+            add(keyView, lParams {
+                // layout_constraintTop_to
+                if (row == 0) {
+                    // first row, align top to top of parent
+                    topOfParent()
+                } else {
+                    // not first row, align top to bottom of first view in last row
+                    topToBottomOf(keyViews[(row - 1) * columnCount])
                 }
-            }
-            Density.Medium, Density.Low -> {
-                keyViews.forEachIndexed { i, keyView ->
-                    val row = i / columnCount
-                    val column = i % columnCount
-                    add(keyView, lParams {
-                        // layout_constraintTop_to
-                        if (row == 0) {
-                            // first row, align top to top of parent
-                            topOfParent()
-                        } else {
-                            // not first row, align top to bottom of first view in last row
-                            topToBottomOf(keyViews[(row - 1) * columnCount])
-                        }
-                        // layout_constraintBottom_to
-                        if (row == rowCount - 1) {
-                            // last row, align bottom to bottom of parent
-                            bottomOfParent()
-                        } else {
-                            // not last row, align bottom to top of first view in next row
-                            bottomToTopOf(keyViews[(row + 1) * columnCount])
-                        }
-                        // layout_constraintStart_to
-                        if (column == 0) {
-                            // first column, align start to start of parent
-                            startOfParent()
-                        } else {
-                            // not first column, align start to end of last column
-                            startToEndOf(keyViews[i - 1])
-                        }
-                        matchConstraintPercentWidth = keyWidth
-                    })
+                // layout_constraintBottom_to
+                if (row == rowCount - 1) {
+                    // last row, align bottom to bottom of parent
+                    bottomOfParent()
+                } else {
+                    // not last row, align bottom to top of first view in next row
+                    bottomToTopOf(keyViews[(row + 1) * columnCount])
                 }
-            }
+                // layout_constraintLeft_to
+                if (column == 0) {
+                    // first column, align start to start of parent
+                    leftOfParent()
+                } else {
+                    // not first column, align start to end of last column
+                    leftToRightOf(keyViews[i - 1])
+                }
+                matchConstraintPercentWidth = keyWidth
+            })
         }
         if (density.showBackspace) {
             add(backspaceKey, lParams {
@@ -177,9 +158,19 @@ class PickerPageUi(override val ctx: Context, val theme: Theme, val density: Den
                 below(keyViews[(rowCount - 2) * columnCount])
                 // bottom/right corner
                 bottomOfParent()
-                endOfParent()
+                rightOfParent()
                 matchConstraintPercentWidth = 0.15f
             })
+            keyViews.last().updateLayoutParams<ConstraintLayout.LayoutParams> {
+                // align right of last key to left of backspace
+                rightToLeftOf(backspaceKey)
+            }
+            keyViews[(rowCount - 1) * columnCount].updateLayoutParams<ConstraintLayout.LayoutParams> {
+                // first key of last row, align its right to the left of its next sibling
+                rightToLeftOf(keyViews[(rowCount - 1) * columnCount + 1])
+                // pack the entire last row together, towards the backspace
+                horizontalChainStyle = ConstraintLayout.LayoutParams.CHAIN_PACKED
+            }
         }
         layoutParams = ViewGroup.LayoutParams(matchParent, matchParent)
     }
@@ -193,6 +184,7 @@ class PickerPageUi(override val ctx: Context, val theme: Theme, val density: Den
             keyView.apply {
                 if (i >= items.size) {
                     isEnabled = false
+                    @SuppressLint("SetTextI18n")
                     mainText.text = ""
                     setOnClickListener(null)
                     setOnLongClickListener(null)
@@ -212,7 +204,14 @@ class PickerPageUi(override val ctx: Context, val theme: Theme, val density: Den
                             // the actual bounds on press. see [^1] as well
                             view.updateBounds()
                         }
-                        onPopupKeyboard(view.id, text, view.bounds)
+                        // TODO: maybe popup keyboard should just accept String as label?
+                        onPopupAction(
+                            PopupAction.ShowKeyboardAction(
+                                view.id,
+                                KeyDef.Popup.Keyboard(text),
+                                bounds
+                            )
+                        )
                         false
                     }
                     swipeEnabled = true
@@ -226,16 +225,20 @@ class PickerPageUi(override val ctx: Context, val theme: Theme, val density: Den
                                     // eg. it's inside the next page of ViewPager
                                     // so update bounds when it's pressed
                                     view.updateBounds()
-                                    onPopupPreview(view.id, text, view.bounds)
+                                    onPopupAction(
+                                        PopupAction.PreviewAction(view.id, text, view.bounds)
+                                    )
                                 }
                                 false
                             }
+
                             CustomGestureView.GestureType.Move -> {
-                                onPopupKeyboardChangeFocus(view.id, event.x, event.y)
+                                onPopupChangeFocus(view.id, event.x, event.y)
                             }
+
                             CustomGestureView.GestureType.Up -> {
-                                onPopupKeyboardTrigger(view.id).also {
-                                    onPopupDismiss(view.id)
+                                onPopupTrigger(view.id).also {
+                                    onPopupAction(PopupAction.DismissAction(view.id))
                                 }
                             }
                         }
@@ -245,28 +248,24 @@ class PickerPageUi(override val ctx: Context, val theme: Theme, val density: Den
         }
     }
 
-    private fun onPopupPreview(viewId: Int, content: String, bounds: Rect) {
-        popupListener?.onPreview(viewId, content, bounds)
+    private fun onPopupAction(action: PopupAction) {
+        popupActionListener?.onPopupAction(action)
     }
 
-    private fun onPopupDismiss(viewId: Int) {
-        popupListener?.onDismiss(viewId)
+    private fun onPopupChangeFocus(viewId: Int, x: Float, y: Float): Boolean {
+        val changeFocusAction = PopupAction.ChangeFocusAction(viewId, x, y)
+        popupActionListener?.onPopupAction(changeFocusAction)
+        return changeFocusAction.outResult
     }
 
-    private fun onPopupKeyboard(viewId: Int, label: String, bounds: Rect) {
-        // TODO: maybe popup keyboard should just accept String as label?
-        popupListener?.onShowKeyboard(viewId, KeyDef.Popup.Keyboard(label), bounds)
-    }
-
-    private fun onPopupKeyboardChangeFocus(viewId: Int, x: Float, y: Float): Boolean {
-        return popupListener?.onChangeFocus(viewId, x, y) ?: false
-    }
-
-    private fun onPopupKeyboardTrigger(viewId: Int): Boolean {
+    private fun onPopupTrigger(viewId: Int): Boolean {
+        val triggerAction = PopupAction.TriggerAction(viewId)
         // TODO: maybe popup keyboard should just yield String value?
-        val action = popupListener?.onTrigger(viewId) as? FcitxKeyAction ?: return false
+        onPopupAction(triggerAction)
+        val action = triggerAction.outAction as? FcitxKeyAction ?: return false
         onSymbolClick(action.act)
-        onPopupDismiss(viewId)
+        onPopupAction(PopupAction.DismissAction(viewId))
         return true
     }
+
 }

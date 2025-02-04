@@ -1,3 +1,7 @@
+/*
+ * SPDX-License-Identifier: LGPL-2.1-or-later
+ * SPDX-FileCopyrightText: Copyright 2021-2023 Fcitx5 for Android Contributors
+ */
 package org.fcitx.fcitx5.android.ui.setup
 
 import android.os.Bundle
@@ -19,17 +23,18 @@ class SetupFragment : Fragment() {
     private val page: SetupPage by lazy { requireArguments().serializable(PAGE)!! }
 
     private var isDone: Boolean = false
-        set(new) {
-            if (new && page.isLastPage())
+        set(value) {
+            if (value && page.isLastPage()) {
                 viewModel.isAllDone.value = true
+            }
             with(binding) {
                 hintText.text = page.getHintText(requireContext())
-                actionButton.visibility = if (new) View.GONE else View.VISIBLE
+                actionButton.visibility = if (value) View.GONE else View.VISIBLE
                 actionButton.text = page.getButtonText(requireContext())
                 actionButton.setOnClickListener { page.getButtonAction(requireContext()) }
-                doneText.visibility = if (new) View.VISIBLE else View.GONE
+                doneText.visibility = if (value) View.VISIBLE else View.GONE
             }
-            field = new
+            field = value
         }
 
     override fun onCreateView(

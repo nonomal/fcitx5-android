@@ -1,3 +1,7 @@
+/*
+ * SPDX-License-Identifier: LGPL-2.1-or-later
+ * SPDX-FileCopyrightText: Copyright 2021-2023 Fcitx5 for Android Contributors
+ */
 package org.fcitx.fcitx5.android.input.popup
 
 import android.content.Context
@@ -5,9 +9,17 @@ import android.graphics.Rect
 import android.graphics.drawable.GradientDrawable
 import android.view.ViewOutlineProvider
 import org.fcitx.fcitx5.android.data.theme.Theme
+import org.fcitx.fcitx5.android.input.AutoScaleTextView
 import org.fcitx.fcitx5.android.input.keyboard.KeyAction
 import splitties.dimensions.dp
-import splitties.views.dsl.core.*
+import splitties.views.dsl.core.Ui
+import splitties.views.dsl.core.add
+import splitties.views.dsl.core.frameLayout
+import splitties.views.dsl.core.horizontalLayout
+import splitties.views.dsl.core.lParams
+import splitties.views.dsl.core.matchParent
+import splitties.views.dsl.core.verticalLayout
+import splitties.views.dsl.core.view
 import splitties.views.gravityCenter
 import splitties.views.gravityEnd
 import splitties.views.gravityStart
@@ -18,7 +30,8 @@ import kotlin.math.roundToInt
 /**
  * @param ctx [Context]
  * @param theme [Theme]
- * @param bounds bound [Rect] of popup trigger view. Used to calculate free space of both sides and
+ * @param outerBounds bound [Rect] of [PopupComponent] root view.
+ * @param triggerBounds bound [Rect] of popup trigger view. Used to calculate free space of both sides and
  * determine column order. See [focusColumn] and [columnOrder].
  * @param onDismissSelf callback when popup keyboard wants to close
  * @param radius popup keyboard and key radius
@@ -32,7 +45,8 @@ import kotlin.math.roundToInt
 class PopupKeyboardUi(
     override val ctx: Context,
     theme: Theme,
-    bounds: Rect,
+    outerBounds: Rect,
+    triggerBounds: Rect,
     onDismissSelf: PopupContainerUi.() -> Unit = {},
     private val radius: Float,
     private val keyWidth: Int,
@@ -40,7 +54,23 @@ class PopupKeyboardUi(
     private val popupHeight: Int,
     private val keys: Array<String>,
     private val labels: Array<String>
-) : PopupContainerUi(ctx, theme, bounds, onDismissSelf) {
+) : PopupContainerUi(ctx, theme, outerBounds, triggerBounds, onDismissSelf) {
+
+    class PopupKeyUi(override val ctx: Context, val theme: Theme, val text: String) : Ui {
+
+        val textView = view(::AutoScaleTextView) {
+            text = this@PopupKeyUi.text
+            scaleMode = AutoScaleTextView.Mode.Proportional
+            textSize = 23f
+            setTextColor(theme.keyTextColor)
+        }
+
+        override val root = frameLayout {
+            add(textView, lParams {
+                gravity = gravityCenter
+            })
+        }
+    }
 
     private val inactiveBackground = GradientDrawable().apply {
         cornerRadius = radius
@@ -65,7 +95,7 @@ class PopupKeyboardUi(
         columnCount = (keyCount / rowCount).roundToInt()
 
         focusRow = 0
-        focusColumn = calcInitialFocusedColumn(columnCount, keyWidth, bounds)
+        focusColumn = calcInitialFocusedColumn(columnCount, keyWidth, outerBounds, triggerBounds)
     }
 
     /**
@@ -97,8 +127,8 @@ class PopupKeyboardUi(
      * Applying only `1.` parts of both X and Y offset, the origin should transform from `o` to `p`.
      * `2.` parts of both offset transform it from `p` to `c`.
      */
-    override val offsetX = ((bounds.width() - keyWidth) / 2) - (keyWidth * focusColumn)
-    override val offsetY = (bounds.height() - popupHeight) - (keyHeight * (rowCount - 1))
+    override val offsetX = ((triggerBounds.width() - keyWidth) / 2) - (keyWidth * focusColumn)
+    override val offsetY = (triggerBounds.height() - popupHeight) - (keyHeight * (rowCount - 1))
 
     private val columnOrder = createColumnOrder(columnCount, focusColumn)
 
@@ -121,14 +151,8 @@ class PopupKeyboardUi(
 
     private var focusedIndex = keyOrders[focusRow][focusColumn]
 
-    private val keyViews = labels.map {
-        textView {
-            text = it
-            textSize = 23f
-            isSingleLine = true
-            gravity = gravityCenter
-            setTextColor(theme.keyTextColor)
-        }
+    private val keyUis = labels.map {
+        PopupKeyUi(ctx, theme, it)
     }
 
     init {
@@ -144,14 +168,14 @@ class PopupKeyboardUi(
             val order = keyOrders[i]
             add(horizontalLayout row@{
                 for (j in 0 until columnCount) {
-                    val view = keyViews.getOrNull(order[j])
-                    if (view == null) {
+                    val keyUi = keyUis.getOrNull(order[j])
+                    if (keyUi == null) {
                         // align columns to right (end) when first column is empty, eg.
                         // |   | 6 | 5 | 4 |(no free space)
                         // | 3 | 2 | 1 | 0 |(no free space)
                         gravity = if (j == 0) gravityEnd else gravityStart
                     } else {
-                        add(view, lParams(keyWidth, keyHeight))
+                        add(keyUi.root, lParams(keyWidth, keyHeight))
                     }
                 }
             }, lParams(width = matchParent))
@@ -159,16 +183,16 @@ class PopupKeyboardUi(
     }
 
     private fun markFocus(index: Int) {
-        keyViews.getOrNull(index)?.apply {
-            background = focusBackground
-            setTextColor(theme.genericActiveForegroundColor)
+        keyUis.getOrNull(index)?.apply {
+            root.background = focusBackground
+            textView.setTextColor(theme.genericActiveForegroundColor)
         }
     }
 
     private fun markInactive(index: Int) {
-        keyViews.getOrNull(index)?.apply {
-            background = null
-            setTextColor(theme.popupTextColor)
+        keyUis.getOrNull(index)?.apply {
+            root.background = null
+            textView.setTextColor(theme.popupTextColor)
         }
     }
 
@@ -185,7 +209,7 @@ class PopupKeyboardUi(
         newRow = limitIndex(newRow, rowCount)
         newColumn = limitIndex(newColumn, columnCount)
         val newFocus = keyOrders[newRow][newColumn]
-        if (newFocus < keyViews.size) {
+        if (newFocus < keyUis.size) {
             markInactive(focusedIndex)
             markFocus(newFocus)
             focusedIndex = newFocus
@@ -193,5 +217,9 @@ class PopupKeyboardUi(
         return false
     }
 
-    override fun onTrigger() = keys.getOrNull(focusedIndex)?.let { KeyAction.FcitxKeyAction(it) }
+    override fun onTrigger(): KeyAction? {
+        val key = keys.getOrNull(focusedIndex) ?: return null
+        return KeyAction.FcitxKeyAction(key)
+    }
+
 }

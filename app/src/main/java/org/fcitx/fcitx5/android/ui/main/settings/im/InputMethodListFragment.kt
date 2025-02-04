@@ -1,12 +1,17 @@
+/*
+ * SPDX-License-Identifier: LGPL-2.1-or-later
+ * SPDX-FileCopyrightText: Copyright 2021-2023 Fcitx5 for Android Contributors
+ */
 package org.fcitx.fcitx5.android.ui.main.settings.im
 
+import android.os.Build
 import android.view.View
 import androidx.core.os.bundleOf
-import androidx.lifecycle.lifecycleScope
 import androidx.navigation.findNavController
 import org.fcitx.fcitx5.android.R
 import org.fcitx.fcitx5.android.core.InputMethodEntry
-import org.fcitx.fcitx5.android.daemon.launchOnFcitxReady
+import org.fcitx.fcitx5.android.daemon.launchOnReady
+import org.fcitx.fcitx5.android.core.SubtypeManager
 import org.fcitx.fcitx5.android.ui.common.BaseDynamicListUi
 import org.fcitx.fcitx5.android.ui.common.DynamicListUi
 import org.fcitx.fcitx5.android.ui.common.OnItemChangedListener
@@ -14,14 +19,15 @@ import org.fcitx.fcitx5.android.ui.main.settings.ProgressFragment
 
 class InputMethodListFragment : ProgressFragment(), OnItemChangedListener<InputMethodEntry> {
 
-    val entries: List<InputMethodEntry>
-        get() = ui.entries
-
     private fun updateIMState() {
-        if (isInitialized)
-            lifecycleScope.launchOnFcitxReady(fcitx) { f ->
-                f.setEnabledIme(entries.map { it.uniqueName }.toTypedArray())
+        if (isInitialized) {
+            fcitx.launchOnReady { f ->
+                f.setEnabledIme(ui.entries.map { it.uniqueName }.toTypedArray())
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                    SubtypeManager.syncWith(f.enabledIme())
+                }
             }
+        }
     }
 
     private lateinit var ui: BaseDynamicListUi<InputMethodEntry>
@@ -49,27 +55,35 @@ class InputMethodListFragment : ProgressFragment(), OnItemChangedListener<InputM
             show = { it.displayName }
         )
         ui.addOnItemChangedListener(this@InputMethodListFragment)
-        // English keyboard shouldn't be removed
-        ui.removable = { it.uniqueName != "keyboard-us" }
+        ui.setViewModel(viewModel)
+        viewModel.enableToolbarEditButton(initialEnabled.isNotEmpty()) {
+            ui.enterMultiSelect(requireActivity().onBackPressedDispatcher)
+        }
         return ui.root
     }
 
-    override fun onResume() {
-        super.onResume()
-        viewModel.disableToolbarSaveButton()
-        viewModel.setToolbarTitle(requireContext().getString(R.string.input_methods_conf))
-        viewModel.enableToolbarEditButton {
-            ui.enterMultiSelect(
-                requireActivity().onBackPressedDispatcher,
-                viewModel
-            )
+    override fun onStart() {
+        super.onStart()
+        if (::ui.isInitialized) {
+            viewModel.enableToolbarEditButton(ui.entries.isNotEmpty()) {
+                ui.enterMultiSelect(requireActivity().onBackPressedDispatcher)
+            }
         }
     }
 
-    override fun onPause() {
-        ui.exitMultiSelect(viewModel)
+    override fun onStop() {
+        if (::ui.isInitialized) {
+            ui.exitMultiSelect()
+        }
         viewModel.disableToolbarEditButton()
-        super.onPause()
+        super.onStop()
+    }
+
+    override fun onDestroy() {
+        if (::ui.isInitialized) {
+            ui.removeItemChangedListener()
+        }
+        super.onDestroy()
     }
 
     override fun onItemSwapped(fromIdx: Int, toIdx: Int, item: InputMethodEntry) {

@@ -1,24 +1,35 @@
+/*
+ * SPDX-License-Identifier: LGPL-2.1-or-later
+ * SPDX-FileCopyrightText: Copyright 2021-2024 Fcitx5 for Android Contributors
+ */
 package org.fcitx.fcitx5.android.input.candidates.expanded
 
 import android.annotation.SuppressLint
 import android.content.Context
 import androidx.constraintlayout.widget.ConstraintLayout
-import androidx.recyclerview.widget.RecyclerView
 import org.fcitx.fcitx5.android.R
 import org.fcitx.fcitx5.android.data.theme.Theme
 import org.fcitx.fcitx5.android.data.theme.ThemeManager
-import org.fcitx.fcitx5.android.input.keyboard.*
+import org.fcitx.fcitx5.android.input.keyboard.BackspaceKey
+import org.fcitx.fcitx5.android.input.keyboard.BaseKeyboard
+import org.fcitx.fcitx5.android.input.keyboard.ImageKeyView
+import org.fcitx.fcitx5.android.input.keyboard.ImageLayoutSwitchKey
+import org.fcitx.fcitx5.android.input.keyboard.KeyDef
+import org.fcitx.fcitx5.android.input.keyboard.ReturnKey
 import splitties.views.backgroundColor
-import splitties.views.dsl.constraintlayout.*
+import splitties.views.dsl.constraintlayout.bottomOfParent
+import splitties.views.dsl.constraintlayout.lParams
+import splitties.views.dsl.constraintlayout.leftOfParent
+import splitties.views.dsl.constraintlayout.leftToRightOf
+import splitties.views.dsl.constraintlayout.rightOfParent
+import splitties.views.dsl.constraintlayout.rightToLeftOf
+import splitties.views.dsl.constraintlayout.topOfParent
 import splitties.views.dsl.core.add
 import splitties.views.dsl.recyclerview.recyclerView
+import splitties.views.imageResource
 
 @SuppressLint("ViewConstructor")
-class ExpandedCandidateLayout(
-    context: Context,
-    theme: Theme,
-    initRecyclerView: RecyclerView.() -> Unit = {}
-) : ConstraintLayout(context) {
+class ExpandedCandidateLayout(context: Context, theme: Theme) : ConstraintLayout(context) {
 
     class Keyboard(context: Context, theme: Theme) : BaseKeyboard(context, theme, Layout) {
         companion object {
@@ -56,6 +67,10 @@ class ExpandedCandidateLayout(
         val pageDnBtn: ImageKeyView by lazy { findViewById(DownBtnId) }
         val backspace: ImageKeyView by lazy { findViewById(R.id.button_backspace) }
         val `return`: ImageKeyView by lazy { findViewById(R.id.button_return) }
+
+        override fun onReturnDrawableUpdate(returnDrawable: Int) {
+            `return`.img.imageResource = returnDrawable
+        }
     }
 
     private val keyBorder by ThemeManager.prefs.keyBorder
@@ -80,19 +95,17 @@ class ExpandedCandidateLayout(
 
         add(recyclerView, lParams {
             topOfParent()
-            startOfParent()
-            before(embeddedKeyboard)
+            leftOfParent()
+            rightToLeftOf(embeddedKeyboard)
             bottomOfParent()
         })
         add(embeddedKeyboard, lParams {
             matchConstraintPercentWidth = 0.15f
             topOfParent()
-            after(recyclerView)
-            endOfParent()
+            leftToRightOf(recyclerView)
+            rightOfParent()
             bottomOfParent()
         })
-
-        initRecyclerView(recyclerView)
     }
 
     fun resetPosition() {

@@ -1,3 +1,7 @@
+/*
+ * SPDX-License-Identifier: LGPL-2.1-or-later
+ * SPDX-FileCopyrightText: Copyright 2021-2023 Fcitx5 for Android Contributors
+ */
 package org.fcitx.fcitx5.android.input.keyboard
 
 import android.graphics.Typeface
@@ -7,6 +11,7 @@ import org.fcitx.fcitx5.android.core.FcitxKeyMapping
 import org.fcitx.fcitx5.android.core.KeyState
 import org.fcitx.fcitx5.android.core.KeyStates
 import org.fcitx.fcitx5.android.core.KeySym
+import org.fcitx.fcitx5.android.data.InputFeedbacks
 import org.fcitx.fcitx5.android.input.keyboard.KeyDef.Appearance.Border
 import org.fcitx.fcitx5.android.input.keyboard.KeyDef.Appearance.Variant
 import org.fcitx.fcitx5.android.input.picker.PickerWindow
@@ -83,7 +88,7 @@ class AlphabetDigitKey(
     ) : this(
         char,
         digit.toString(),
-        0xffb0 + digit,
+        FcitxKeyMapping.FcitxKey_KP_0 + digit,
         popup
     )
 }
@@ -128,7 +133,8 @@ class BackspaceKey(
         src = R.drawable.ic_baseline_backspace_24,
         percentWidth = percentWidth,
         variant = variant,
-        viewId = R.id.button_backspace
+        viewId = R.id.button_backspace,
+        soundEffect = InputFeedbacks.SoundEffect.Delete
     ),
     setOf(
         Behavior.Press(KeyAction.SymAction(KeySym(FcitxKeyMapping.FcitxKey_BackSpace))),
@@ -152,11 +158,12 @@ class CommaKey(
     percentWidth: Float,
     variant: Variant,
 ) : KeyDef(
-    Appearance.Text(
+    Appearance.ImageText(
         displayText = ",",
         textSize = 23f,
         percentWidth = percentWidth,
-        variant = variant
+        variant = variant,
+        src = R.drawable.ic_baseline_tag_faces_24
     ),
     setOf(
         Behavior.Press(KeyAction.FcitxKeyAction(","))
@@ -192,8 +199,8 @@ class LanguageKey : KeyDef(
         viewId = R.id.button_lang
     ),
     setOf(
-        Behavior.Press(KeyAction.LangSwitchAction()),
-        Behavior.LongPress(KeyAction.InputMethodSwitchAction)
+        Behavior.Press(KeyAction.LangSwitchAction),
+        Behavior.LongPress(KeyAction.ShowInputMethodPickerAction)
     )
 )
 
@@ -203,11 +210,12 @@ class SpaceKey : KeyDef(
         textSize = 13f,
         percentWidth = 0f,
         border = Border.Special,
-        viewId = R.id.button_space
+        viewId = R.id.button_space,
+        soundEffect = InputFeedbacks.SoundEffect.SpaceBar
     ),
     setOf(
         Behavior.Press(KeyAction.SymAction(KeySym(FcitxKeyMapping.FcitxKey_space))),
-        Behavior.LongPress(KeyAction.LangSwitchAction(enumerate = false))
+        Behavior.LongPress(KeyAction.SpaceLongPressAction)
     )
 )
 
@@ -217,7 +225,8 @@ class ReturnKey(percentWidth: Float = 0.15f) : KeyDef(
         percentWidth = percentWidth,
         variant = Variant.Accent,
         border = Border.Special,
-        viewId = R.id.button_return
+        viewId = R.id.button_return,
+        soundEffect = InputFeedbacks.SoundEffect.Return
     ),
     setOf(
         Behavior.Press(KeyAction.SymAction(KeySym(FcitxKeyMapping.FcitxKey_Return)))

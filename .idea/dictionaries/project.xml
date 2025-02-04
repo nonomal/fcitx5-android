@@ -3,18 +3,26 @@
     <words>
       <w>androidfrontend</w>
       <w>androidkeyboard</w>
+      <w>androidnotification</w>
       <w>berberman</w>
+      <w>bopomofo</w>
       <w>constraintlayout</w>
       <w>cout</w>
+      <w>customphrase</w>
       <w>endl</w>
       <w>fcitx</w>
       <w>fmtlib</w>
       <w>icuuid</w>
+      <w>inputmethodservice</w>
+      <w>iostreams</w>
       <w>iter</w>
       <w>jbytes</w>
       <w>jnicall</w>
       <w>jobject</w>
       <w>jstring</w>
+      <w>jyutping</w>
+      <w>kawaii</w>
+      <w>keypress</w>
       <w>lgpl</w>
       <w>libevent</w>
       <w>libime</w>
@@ -25,13 +33,19 @@
       <w>pkgdatadir</w>
       <w>preedit</w>
       <w>quickphrase</w>
+      <w>sayura</w>
       <w>sdkmanager</w>
       <w>setenv</w>
       <w>shijienihao</w>
       <w>shuangpin</w>
+      <w>sinhala</w>
+      <w>snackbar</w>
       <w>spdx</w>
       <w>stringutils</w>
       <w>unfocus</w>
+      <w>unikey</w>
+      <w>zhuyin</w>
+      <w>zlib</w>
     </words>
   </dictionary>
 </component>

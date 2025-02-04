@@ -1,3 +1,7 @@
+/*
+ * SPDX-License-Identifier: LGPL-2.1-or-later
+ * SPDX-FileCopyrightText: Copyright 2021-2023 Fcitx5 for Android Contributors
+ */
 package org.fcitx.fcitx5.android.ui.main.settings
 
 import android.content.Context
@@ -9,7 +13,14 @@ import org.fcitx.fcitx5.android.R
 import org.fcitx.fcitx5.android.utils.setOnChangeListener
 import splitties.dimensions.dp
 import splitties.resources.resolveThemeAttribute
-import splitties.views.dsl.core.*
+import splitties.views.dsl.core.add
+import splitties.views.dsl.core.horizontalMargin
+import splitties.views.dsl.core.lParams
+import splitties.views.dsl.core.matchParent
+import splitties.views.dsl.core.seekBar
+import splitties.views.dsl.core.textView
+import splitties.views.dsl.core.verticalLayout
+import splitties.views.dsl.core.verticalMargin
 import splitties.views.gravityHorizontalCenter
 import splitties.views.textAppearance
 
@@ -36,7 +47,7 @@ class DialogSeekBarPreference @JvmOverloads constructor(
     var step: Int
     var unit: String
 
-    var default: Int? = null
+    var default: Int = 0
     var defaultLabel: String? = null
 
     init {
@@ -63,15 +74,15 @@ class DialogSeekBarPreference @JvmOverloads constructor(
 
     override fun setDefaultValue(defaultValue: Any?) {
         super.setDefaultValue(defaultValue)
-        (defaultValue as? Int)?.let { default = it }
+        default = defaultValue as? Int ?: 0
     }
 
     override fun onGetDefaultValue(a: TypedArray, index: Int): Any {
-        return a.getInteger(index, 0)
+        return a.getInteger(index, default)
     }
 
     override fun onSetInitialValue(defaultValue: Any?) {
-        value = getPersistedInt(defaultValue as? Int ?: 0)
+        value = getPersistedInt(defaultValue as? Int ?: default)
     }
 
     override fun onClick() {
@@ -81,19 +92,19 @@ class DialogSeekBarPreference @JvmOverloads constructor(
     /**
      * Shows the seek bar dialog.
      */
-    private fun showSeekBarDialog() = with(context) {
-        val textView = textView {
+    private fun showSeekBarDialog() {
+        val textView = context.textView {
             text = textForValue(value)
             textAppearance = context.resolveThemeAttribute(android.R.attr.textAppearanceListItem)
         }
-        val seekBar = seekBar {
+        val seekBar = context.seekBar {
             max = progressForValue(this@DialogSeekBarPreference.max)
             progress = progressForValue(value)
             setOnChangeListener {
                 textView.text = textForValue(valueForProgress(it))
             }
         }
-        val dialogContent = verticalLayout {
+        val dialogContent = context.verticalLayout {
             gravity = gravityHorizontalCenter
             if (dialogMessage != null) {
                 val messageText = textView { text = dialogMessage }
@@ -119,9 +130,7 @@ class DialogSeekBarPreference @JvmOverloads constructor(
                 setValue(value)
             }
             .setNeutralButton(R.string.default_) { _, _ ->
-                default?.let {
-                    setValue(it)
-                }
+                setValue(default)
             }
             .setNegativeButton(android.R.string.cancel, null)
             .show()

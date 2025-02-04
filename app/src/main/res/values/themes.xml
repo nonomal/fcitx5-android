@@ -8,14 +8,11 @@
         <item name="colorLogInfo">@color/blue_500</item>
         <item name="colorLogDebug">@color/grey_700</item>
         <item name="colorLogVerbose">@color/grey_700</item>
-
-        <item name="android:statusBarColor">@android:color/transparent</item>
-        <item name="android:windowLightStatusBar">true</item>
-        <item name="android:navigationBarColor">@android:color/transparent</item>
-        <item name="android:windowLightNavigationBar" tools:targetApi="o_mr1">true</item>
     </style>
 
     <style name="Theme.InputViewTheme" parent="@android:style/Theme.DeviceDefault.Settings" />
 
     <style name="Theme.DialogTheme" parent="@android:style/Theme.DeviceDefault.Light.Dialog" />
+
+    <style name="InputViewSnackbarTheme" parent="Theme.MaterialComponents.Light.NoActionBar" />
 </resources>

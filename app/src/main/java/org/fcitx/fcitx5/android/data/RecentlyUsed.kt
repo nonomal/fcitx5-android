@@ -1,6 +1,10 @@
+/*
+ * SPDX-License-Identifier: LGPL-2.1-or-later
+ * SPDX-FileCopyrightText: Copyright 2021-2023 Fcitx5 for Android Contributors
+ */
 package org.fcitx.fcitx5.android.data
 
-import org.fcitx.fcitx5.android.utils.appContext
+import org.fcitx.fcitx5.android.FcitxApplication
 
 // Not thread-safe
 class RecentlyUsed(
@@ -12,10 +16,11 @@ class RecentlyUsed(
         const val DIR_NAME = "recently_used"
     }
 
-    private val file = appContext.filesDir.resolve(DIR_NAME).run {
-        mkdirs()
-        resolve(fileName).apply { createNewFile() }
-    }
+    private val file =
+        FcitxApplication.getInstance().directBootAwareContext.filesDir.resolve(DIR_NAME).run {
+            mkdirs()
+            resolve(fileName).apply { createNewFile() }
+        }
 
     fun load() {
         val xs = file.readLines()

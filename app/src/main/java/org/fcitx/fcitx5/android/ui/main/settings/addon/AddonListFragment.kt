@@ -1,15 +1,18 @@
+/*
+ * SPDX-License-Identifier: LGPL-2.1-or-later
+ * SPDX-FileCopyrightText: Copyright 2021-2023 Fcitx5 for Android Contributors
+ */
 package org.fcitx.fcitx5.android.ui.main.settings.addon
 
 import android.view.View
 import androidx.annotation.StringRes
 import androidx.appcompat.app.AlertDialog
 import androidx.core.os.bundleOf
-import androidx.lifecycle.lifecycleScope
 import androidx.navigation.findNavController
 import org.fcitx.fcitx5.android.R
 import org.fcitx.fcitx5.android.core.AddonInfo
 import org.fcitx.fcitx5.android.core.FcitxAPI
-import org.fcitx.fcitx5.android.daemon.launchOnFcitxReady
+import org.fcitx.fcitx5.android.daemon.launchOnReady
 import org.fcitx.fcitx5.android.ui.common.BaseDynamicListUi
 import org.fcitx.fcitx5.android.ui.common.CheckBoxListUi
 import org.fcitx.fcitx5.android.ui.common.OnItemChangedListener
@@ -17,22 +20,16 @@ import org.fcitx.fcitx5.android.ui.main.settings.ProgressFragment
 
 class AddonListFragment : ProgressFragment(), OnItemChangedListener<AddonInfo> {
 
-    private val entries: List<AddonInfo>
-        get() = ui.entries
-
     private lateinit var ui: BaseDynamicListUi<AddonInfo>
 
     private val addonDisplayNames = mutableMapOf<String, String>()
 
     private fun updateAddonState() {
-        if (!isInitialized)
-            return
-        with(entries) {
-            val ids = map { it.uniqueName }.toTypedArray()
-            val state = map { it.enabled }.toBooleanArray()
-            lifecycleScope.launchOnFcitxReady(fcitx) {
-                it.setAddonState(ids, state)
-            }
+        if (!isInitialized) return
+        val ids = ui.entries.map { it.uniqueName }.toTypedArray()
+        val state = ui.entries.map { it.enabled }.toBooleanArray()
+        fcitx.launchOnReady {
+            it.setAddonState(ids, state)
         }
     }
 
@@ -78,11 +75,11 @@ class AddonListFragment : ProgressFragment(), OnItemChangedListener<AddonInfo> {
                         reset()
                     }
                     .setPositiveButton(android.R.string.ok) { _, _ ->
-                        entries.mapIndexedNotNull { idx, x ->
-                            x.takeIf { it.uniqueName in depU }?.uniqueName?.let { idx }
-                        }.forEach {
+                        ui.entries.forEachIndexed { idx, addonInfo ->
                             // TODO: combine update addon states
-                            ui.updateItem(it, entries[it].copy(enabled = false))
+                            if (addonInfo.uniqueName in depU) {
+                                ui.updateItem(idx, addonInfo.copy(enabled = false))
+                            }
                         }
                         ui.updateItem(ui.indexItem(entry), entry.copy(enabled = false))
                     }
@@ -90,6 +87,8 @@ class AddonListFragment : ProgressFragment(), OnItemChangedListener<AddonInfo> {
             } else {
                 ui.updateItem(ui.indexItem(entry), entry.copy(enabled = false))
             }
+        } else {
+            ui.updateItem(ui.indexItem(entry), entry.copy(enabled = false))
         }
     }
 
@@ -136,14 +135,15 @@ class AddonListFragment : ProgressFragment(), OnItemChangedListener<AddonInfo> {
         return ui.root
     }
 
-    override fun onResume() {
-        super.onResume()
-        viewModel.setToolbarTitle(requireContext().getString(R.string.addons_conf))
-        viewModel.disableToolbarSaveButton()
-    }
-
     override fun onItemUpdated(idx: Int, old: AddonInfo, new: AddonInfo) {
         updateAddonState()
+    }
+
+    override fun onDestroy() {
+        if (isInitialized) {
+            ui.removeItemChangedListener()
+        }
+        super.onDestroy()
     }
 
 }

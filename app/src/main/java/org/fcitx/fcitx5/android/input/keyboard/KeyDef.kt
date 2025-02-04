@@ -1,7 +1,12 @@
+/*
+ * SPDX-License-Identifier: LGPL-2.1-or-later
+ * SPDX-FileCopyrightText: Copyright 2021-2023 Fcitx5 for Android Contributors
+ */
 package org.fcitx.fcitx5.android.input.keyboard
 
 import android.graphics.Typeface
 import androidx.annotation.DrawableRes
+import org.fcitx.fcitx5.android.data.InputFeedbacks
 
 open class KeyDef(
     val appearance: Appearance,
@@ -12,7 +17,9 @@ open class KeyDef(
         val percentWidth: Float,
         val variant: Variant,
         val border: Border,
+        val margin: Boolean,
         val viewId: Int,
+        val soundEffect: InputFeedbacks.SoundEffect
     ) {
         enum class Variant {
             Normal, AltForeground, Alternative, Accent
@@ -33,8 +40,10 @@ open class KeyDef(
             percentWidth: Float = 0.1f,
             variant: Variant = Variant.Normal,
             border: Border = Border.Default,
-            viewId: Int = -1
-        ) : Appearance(percentWidth, variant, border, viewId)
+            margin: Boolean = true,
+            viewId: Int = -1,
+            soundEffect: InputFeedbacks.SoundEffect = InputFeedbacks.SoundEffect.Standard
+        ) : Appearance(percentWidth, variant, border, margin, viewId, soundEffect)
 
         class AltText(
             displayText: String,
@@ -48,8 +57,9 @@ open class KeyDef(
             percentWidth: Float = 0.1f,
             variant: Variant = Variant.Normal,
             border: Border = Border.Default,
-            viewId: Int = -1
-        ) : Text(displayText, textSize, textStyle, percentWidth, variant, border, viewId)
+            margin: Boolean = true,
+            viewId: Int = -1,
+        ) : Text(displayText, textSize, textStyle, percentWidth, variant, border, margin, viewId)
 
         class Image(
             @DrawableRes
@@ -57,8 +67,27 @@ open class KeyDef(
             percentWidth: Float = 0.1f,
             variant: Variant = Variant.Normal,
             border: Border = Border.Default,
+            margin: Boolean = true,
+            viewId: Int = -1,
+            soundEffect: InputFeedbacks.SoundEffect = InputFeedbacks.SoundEffect.Standard
+        ) : Appearance(percentWidth, variant, border, margin, viewId, soundEffect)
+
+        class ImageText(
+            displayText: String,
+            textSize: Float,
+            /**
+             * `Int` constants in [Typeface].
+             * Can be `NORMAL`(default), `BOLD`, `ITALIC` or `BOLD_ITALIC`
+             */
+            textStyle: Int = Typeface.NORMAL,
+            @DrawableRes
+            val src: Int,
+            percentWidth: Float = 0.1f,
+            variant: Variant = Variant.Normal,
+            border: Border = Border.Default,
+            margin: Boolean = true,
             viewId: Int = -1
-        ) : Appearance(percentWidth, variant, border, viewId)
+        ) : Text(displayText, textSize, textStyle, percentWidth, variant, border, margin, viewId)
     }
 
     sealed class Behavior {

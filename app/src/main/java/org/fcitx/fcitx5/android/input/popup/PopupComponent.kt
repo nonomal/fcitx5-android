@@ -1,17 +1,22 @@
+/*
+ * SPDX-License-Identifier: LGPL-2.1-or-later
+ * SPDX-FileCopyrightText: Copyright 2021-2023 Fcitx5 for Android Contributors
+ */
 package org.fcitx.fcitx5.android.input.popup
 
 import android.graphics.Rect
+import android.view.View
 import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import org.fcitx.fcitx5.android.data.theme.ThemeManager
+import org.fcitx.fcitx5.android.input.broadcast.PunctuationComponent
 import org.fcitx.fcitx5.android.input.dependency.context
 import org.fcitx.fcitx5.android.input.dependency.inputMethodService
 import org.fcitx.fcitx5.android.input.dependency.theme
 import org.fcitx.fcitx5.android.input.keyboard.KeyAction
 import org.fcitx.fcitx5.android.input.keyboard.KeyDef
-import org.fcitx.fcitx5.android.input.punctuation.PunctuationComponent
 import org.mechdancer.dependency.Dependent
 import org.mechdancer.dependency.UniqueComponent
 import org.mechdancer.dependency.manager.ManagedHandler
@@ -21,7 +26,7 @@ import splitties.dimensions.dp
 import splitties.views.dsl.core.add
 import splitties.views.dsl.core.frameLayout
 import splitties.views.dsl.core.lParams
-import java.util.*
+import java.util.LinkedList
 
 class PopupComponent :
     UniqueComponent<PopupComponent>(), Dependent, ManagedHandler by managedHandler() {
@@ -54,14 +59,26 @@ class PopupComponent :
     }
     private val hideThreshold = 100L
 
+    private val rootLocation = intArrayOf(0, 0)
+    private val rootBounds: Rect = Rect()
+
     val root by lazy {
         context.frameLayout {
+            // we want (0, 0) at top left
+            layoutDirection = View.LAYOUT_DIRECTION_LTR
             isClickable = false
             isFocusable = false
+
+            addOnLayoutChangeListener { v, left, top, right, bottom, _, _, _, _ ->
+                val (x, y) = rootLocation.also { v.getLocationInWindow(it) }
+                val width = right - left
+                val height = bottom - top
+                rootBounds.set(x, y, x + width, y + height)
+            }
         }
     }
 
-    fun showPopup(viewId: Int, content: String, bounds: Rect) {
+    private fun showPopup(viewId: Int, content: String, bounds: Rect) {
         showingEntryUi[viewId]?.apply {
             dismissJobs[viewId]?.also {
                 dismissJobs.remove(viewId)?.cancel()
@@ -85,11 +102,11 @@ class PopupComponent :
         showingEntryUi[viewId] = popup
     }
 
-    fun updatePopup(viewId: Int, content: String) {
+    private fun updatePopup(viewId: Int, content: String) {
         showingEntryUi[viewId]?.setText(content)
     }
 
-    fun showKeyboard(viewId: Int, keyboard: KeyDef.Popup.Keyboard, bounds: Rect) {
+    private fun showKeyboard(viewId: Int, keyboard: KeyDef.Popup.Keyboard, bounds: Rect) {
         val keys = PopupPreset[keyboard.label] ?: return
         // clear popup preview text         OR create empty popup preview
         showingEntryUi[viewId]?.setText("") ?: showPopup(viewId, "", bounds)
@@ -103,6 +120,7 @@ class PopupComponent :
         val keyboardUi = PopupKeyboardUi(
             context,
             theme,
+            rootBounds,
             bounds,
             { dismissPopup(viewId) },
             popupRadius,
@@ -113,44 +131,43 @@ class PopupComponent :
             keys,
             labels
         )
-        root.apply {
-            add(keyboardUi.root, lParams {
-                leftMargin = bounds.left + keyboardUi.offsetX
-                topMargin = bounds.top + keyboardUi.offsetY
-            })
-        }
-        showingContainerUi[viewId] = keyboardUi
+        showPopupContainer(viewId, keyboardUi)
     }
 
-    fun showMenu(viewId: Int, menu: KeyDef.Popup.Menu, bounds: Rect) {
+    private fun showMenu(viewId: Int, menu: KeyDef.Popup.Menu, bounds: Rect) {
         showingEntryUi[viewId]?.let {
             dismissPopupEntry(viewId, it)
         }
         val menuUi = PopupMenuUi(
             context,
             theme,
+            rootBounds,
             bounds,
             { dismissPopup(viewId) },
             menu.items,
         )
-        root.apply {
-            add(menuUi.root, lParams {
-                leftMargin = bounds.left + menuUi.offsetX
-                topMargin = bounds.top + menuUi.offsetY
-            })
-        }
-        showingContainerUi[viewId] = menuUi
+        showPopupContainer(viewId, menuUi)
     }
 
-    fun changeFocus(viewId: Int, x: Float, y: Float): Boolean {
+    private fun showPopupContainer(viewId: Int, ui: PopupContainerUi) {
+        root.apply {
+            add(ui.root, lParams {
+                leftMargin = ui.triggerBounds.left + ui.offsetX - rootBounds.left
+                topMargin = ui.triggerBounds.top + ui.offsetY - rootBounds.top
+            })
+        }
+        showingContainerUi[viewId] = ui
+    }
+
+    private fun changeFocus(viewId: Int, x: Float, y: Float): Boolean {
         return showingContainerUi[viewId]?.changeFocus(x, y) ?: false
     }
 
-    fun triggerFocused(viewId: Int): KeyAction? {
+    private fun triggerFocused(viewId: Int): KeyAction? {
         return showingContainerUi[viewId]?.onTrigger()
     }
 
-    fun dismissPopup(viewId: Int) {
+    private fun dismissPopup(viewId: Int) {
         dismissPopupContainer(viewId)
         showingEntryUi[viewId]?.also {
             val timeLeft = it.lastShowTime + hideThreshold - System.currentTimeMillis()
@@ -198,33 +215,17 @@ class PopupComponent :
         showingEntryUi.clear()
     }
 
-    val listener: PopupListener = object : PopupListener {
-        override fun onPreview(viewId: Int, content: String, bounds: Rect) {
-            showPopup(viewId, content, bounds)
-        }
-
-        override fun onPreviewUpdate(viewId: Int, content: String) {
-            updatePopup(viewId, content)
-        }
-
-        override fun onDismiss(viewId: Int) {
-            dismissPopup(viewId)
-        }
-
-        override fun onShowKeyboard(viewId: Int, keyboard: KeyDef.Popup.Keyboard, bounds: Rect) {
-            showKeyboard(viewId, keyboard, bounds)
-        }
-
-        override fun onShowMenu(viewId: Int, menu: KeyDef.Popup.Menu, bounds: Rect) {
-            showMenu(viewId, menu, bounds)
-        }
-
-        override fun onChangeFocus(viewId: Int, x: Float, y: Float): Boolean {
-            return changeFocus(viewId, x, y)
-        }
-
-        override fun onTrigger(viewId: Int): KeyAction? {
-            return triggerFocused(viewId)
+    val listener = PopupActionListener { action ->
+        with(action) {
+            when (this) {
+                is PopupAction.ChangeFocusAction -> outResult = changeFocus(viewId, x, y)
+                is PopupAction.DismissAction -> dismissPopup(viewId)
+                is PopupAction.PreviewAction -> showPopup(viewId, content, bounds)
+                is PopupAction.PreviewUpdateAction -> updatePopup(viewId, content)
+                is PopupAction.ShowKeyboardAction -> showKeyboard(viewId, keyboard, bounds)
+                is PopupAction.ShowMenuAction -> showMenu(viewId, menu, bounds)
+                is PopupAction.TriggerAction -> outAction = triggerFocused(viewId)
+            }
         }
     }
 }

@@ -1,3 +1,7 @@
+/*
+ * SPDX-License-Identifier: LGPL-2.1-or-later
+ * SPDX-FileCopyrightText: Copyright 2021-2023 Fcitx5 for Android Contributors
+ */
 package org.fcitx.fcitx5.android.core
 
 import android.view.KeyEvent
@@ -7,7 +11,7 @@ infix fun UInt.or(other: KeyState): UInt = this or other.state
 
 /**
  * translated from
- * [fcitx-utils/keysym.h](https://github.com/fcitx/fcitx5/blob/5.0.15/src/lib/fcitx-utils/keysym.h)
+ * [fcitx-utils/keysym.h](https://github.com/fcitx/fcitx5/blob/0346e58/src/lib/fcitx-utils/keysym.h)
  */
 @Suppress("Unused", "EnumEntryName")
 enum class KeyState(val state: UInt) {
@@ -34,18 +38,14 @@ enum class KeyState(val state: UInt) {
     Super2(1u shl 26), // Gtk virtual Super
     Hyper2(1u shl 27), // Gtk virtual Hyper
     Meta(1u shl 28),
+    Virtual(1u shl 29),
 
     /**
      * Whether a Key Press is from key repetition.
      */
     Repeat(1u shl 31),
     UsedMask(0x5c001fffu),
-    SimpleMask(Ctrl_Alt_Shift or Super or Super2 or Hyper or Meta),
-
-    /**
-     * Whether a Key Press is from virtual keyboard. **used in `fcitx5-android` only**.
-     */
-    Virtual(1u shl 16);
+    SimpleMask(Ctrl_Alt_Shift or Super or Super2 or Hyper or Meta);
 
     constructor(other: KeyState) : this(other.state)
 
@@ -91,6 +91,8 @@ value class KeyStates(val states: UInt) {
 
     companion object {
         val Empty = KeyStates(0u)
+
+        val Virtual = KeyStates(KeyState.Virtual)
 
         fun of(v: Int) = KeyStates(v.toUInt())
 

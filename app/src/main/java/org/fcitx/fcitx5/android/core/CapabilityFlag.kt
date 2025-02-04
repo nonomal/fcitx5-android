@@ -1,3 +1,7 @@
+/*
+ * SPDX-License-Identifier: LGPL-2.1-or-later
+ * SPDX-FileCopyrightText: Copyright 2021-2023 Fcitx5 for Android Contributors
+ */
 package org.fcitx.fcitx5.android.core
 
 import android.text.InputType
@@ -6,7 +10,7 @@ import splitties.bitflags.hasFlag
 
 /**
  * translated from
- * [fcitx-utils/capabilityflags.h](https://github.com/fcitx/fcitx5/blob/5.0.13/src/lib/fcitx-utils/capabilityflags.h)
+ * [fcitx-utils/capabilityflags.h](https://github.com/fcitx/fcitx5/blob/5.1.1/src/lib/fcitx-utils/capabilityflags.h)
  */
 @Suppress("unused")
 enum class CapabilityFlag(val flag: ULong) {
@@ -60,6 +64,17 @@ enum class CapabilityFlag(val flag: ULong) {
      */
     ClientSideInputPanel(1UL shl 39),
 
+    /**
+     * Whether client request input method to be disabled.
+     * Usually this means only allow to type with raw keyboard.
+     */
+    Disable(1UL shl 40),
+
+    /**
+     * Whether client support commit string with cursor location.
+     */
+    CommitStringWithCursor(1UL shl 41),
+
     PasswordOrSensitive(Password.flag or Sensitive.flag);
 
 }
@@ -73,15 +88,15 @@ value class CapabilityFlags constructor(val flags: ULong) {
         fun mergeFlags(arr: Array<out CapabilityFlag>): ULong =
             arr.fold(CapabilityFlag.NoFlag.flag) { acc, it -> acc or it.flag }
 
-        private val DefaultFlags = CapabilityFlags(
-            CapabilityFlag.Preedit.flag or
-                    CapabilityFlag.ClientUnfocusCommit.flag or
-                    CapabilityFlag.ClientSideInputPanel.flag
+        val DefaultFlags = CapabilityFlags(
+            CapabilityFlag.Preedit,
+            CapabilityFlag.ClientUnfocusCommit,
+            CapabilityFlag.CommitStringWithCursor
         )
 
-        fun fromEditorInfo(info: EditorInfo?): CapabilityFlags {
+        fun fromEditorInfo(info: EditorInfo): CapabilityFlags {
             var flags = DefaultFlags.flags
-            info?.imeOptions?.let {
+            info.imeOptions.let {
                 if (it.hasFlag(EditorInfo.IME_FLAG_FORCE_ASCII)) {
                     flags += CapabilityFlag.Alpha
                 }
@@ -89,7 +104,7 @@ value class CapabilityFlags constructor(val flags: ULong) {
                     flags += CapabilityFlag.Sensitive
                 }
             }
-            info?.inputType?.let {
+            info.inputType.let {
                 when (it and InputType.TYPE_MASK_CLASS) {
                     InputType.TYPE_NULL -> {
                         flags -= CapabilityFlag.Preedit
@@ -127,10 +142,12 @@ value class CapabilityFlags constructor(val flags: ULong) {
                                 flags += CapabilityFlag.Email
                             }
                             if (equals(InputType.TYPE_TEXT_VARIATION_PASSWORD) ||
-                                equals(InputType.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD) ||
                                 equals(InputType.TYPE_TEXT_VARIATION_WEB_PASSWORD)
                             ) {
                                 flags += CapabilityFlag.Password
+                            }
+                            if (equals(InputType.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD)) {
+                                flags += CapabilityFlag.Sensitive
                             }
                             if (equals(InputType.TYPE_TEXT_VARIATION_URI)) {
                                 flags += CapabilityFlag.Url
@@ -163,6 +180,10 @@ value class CapabilityFlags constructor(val flags: ULong) {
     }
 
     constructor(vararg flags: CapabilityFlag) : this(mergeFlags(flags))
+
+    fun has(flag: ULong) = flags.hasFlag(flag)
+
+    fun has(flag: CapabilityFlag) = flags.hasFlag(flag.flag)
 
     fun toLong() = flags.toLong()
 }

@@ -1,3 +1,7 @@
+/*
+ * SPDX-License-Identifier: LGPL-2.1-or-later
+ * SPDX-FileCopyrightText: Copyright 2021-2023 Fcitx5 for Android Contributors
+ */
 package org.fcitx.fcitx5.android.ui.main.settings
 
 import android.content.Context
@@ -13,12 +17,21 @@ import org.fcitx.fcitx5.android.R
 import org.fcitx.fcitx5.android.utils.setOnChangeListener
 import splitties.dimensions.dp
 import splitties.resources.resolveThemeAttribute
-import splitties.views.dsl.constraintlayout.*
-import splitties.views.dsl.core.*
+import splitties.views.dsl.constraintlayout.below
+import splitties.views.dsl.constraintlayout.centerHorizontally
+import splitties.views.dsl.constraintlayout.constraintLayout
+import splitties.views.dsl.constraintlayout.endOfParent
+import splitties.views.dsl.constraintlayout.lParams
+import splitties.views.dsl.constraintlayout.matchConstraints
+import splitties.views.dsl.constraintlayout.startOfParent
+import splitties.views.dsl.constraintlayout.topOfParent
+import splitties.views.dsl.core.add
+import splitties.views.dsl.core.horizontalMargin
+import splitties.views.dsl.core.seekBar
+import splitties.views.dsl.core.textView
+import splitties.views.dsl.core.verticalMargin
+import splitties.views.dsl.core.wrapContent
 import splitties.views.textAppearance
-import kotlin.contracts.ExperimentalContracts
-import kotlin.contracts.InvocationKind
-import kotlin.contracts.contract
 
 class TwinSeekBarPreference @JvmOverloads constructor(
     context: Context,
@@ -34,8 +47,8 @@ class TwinSeekBarPreference @JvmOverloads constructor(
     var secondaryKey: String = ""
     var secondaryLabel: String = ""
 
-    var default: Int? = null
-    var secondaryDefault: Int? = null
+    var default: Int = 0
+    var secondaryDefault: Int = 0
     var defaultLabel: String? = null
 
     var value = 0
@@ -45,19 +58,22 @@ class TwinSeekBarPreference @JvmOverloads constructor(
 
     override fun onSetInitialValue(defaultValue: Any?) {
         preferenceDataStore?.apply {
-            value = getInt(key, 0)
-            secondaryValue = getInt(secondaryKey, 0)
+            value = getInt(key, default)
+            secondaryValue = getInt(secondaryKey, secondaryDefault)
         } ?: sharedPreferences?.apply {
-            value = getInt(key, 0)
-            secondaryValue = getInt(secondaryKey, 0)
+            value = getInt(key, default)
+            secondaryValue = getInt(secondaryKey, secondaryDefault)
         }
     }
 
+    /**
+     * @param defaultValue should be `Pair<Int, Int>`
+     */
     override fun setDefaultValue(defaultValue: Any?) {
-        (defaultValue as? Pair<*, *>)?.apply {
-            (first as? Int)?.let { value = it; default = it }
-            (second as? Int)?.let { secondaryValue = it; secondaryDefault = it }
-        }
+        super.setDefaultValue(defaultValue)
+        val (first, second) = defaultValue as? Pair<*, *> ?: return
+        default = first as? Int ?: 0
+        secondaryDefault = second as? Int ?: 0
     }
 
     private fun persistValues(primary: Int, secondary: Int) {
@@ -77,15 +93,12 @@ class TwinSeekBarPreference @JvmOverloads constructor(
         showDialog()
     }
 
-    @OptIn(ExperimentalContracts::class)
     private fun ConstraintLayout.addSeekBar(
         label: String,
         initialValue: Int,
         defaultValue: Int? = null,
-        belowView: View? = null,
-        initSeekBar: SeekBar.() -> Unit = {}
-    ) {
-        contract { callsInPlace(initSeekBar, InvocationKind.EXACTLY_ONCE) }
+        belowView: View? = null
+    ): SeekBar {
         val textLabel = textView {
             text = label
             textAppearance = context.resolveThemeAttribute(android.R.attr.textAppearanceListItem)
@@ -100,7 +113,6 @@ class TwinSeekBarPreference @JvmOverloads constructor(
             setOnChangeListener {
                 valueLabel.text = textForValue(valueForProgress(it), defaultValue)
             }
-            initSeekBar(this)
         }
         val textMargin = dp(24)
         val seekBarMargin = dp(10)
@@ -118,13 +130,14 @@ class TwinSeekBarPreference @JvmOverloads constructor(
             below(valueLabel, seekBarMargin)
             centerHorizontally(seekBarMargin)
         })
+        return seekBar
     }
 
-    private fun showDialog() = with(context) {
+    private fun showDialog() {
         var messageText: TextView? = null
         val primarySeekBar: SeekBar
         val secondarySeekBar: SeekBar
-        val dialogContent = constraintLayout {
+        val dialogContent = context.constraintLayout {
             if (dialogMessage != null) {
                 messageText = textView { text = dialogMessage }
                 add(messageText!!, lParams {
@@ -132,12 +145,8 @@ class TwinSeekBarPreference @JvmOverloads constructor(
                     horizontalMargin = dp(24)
                 })
             }
-            addSeekBar(label, value, default, messageText) {
-                primarySeekBar = this
-            }
-            addSeekBar(secondaryLabel, secondaryValue, secondaryDefault, primarySeekBar) {
-                secondarySeekBar = this
-            }
+            primarySeekBar = addSeekBar(label, value, default, messageText)
+            secondarySeekBar = addSeekBar(secondaryLabel, secondaryValue, secondaryDefault, primarySeekBar)
         }
         AlertDialog.Builder(context)
             .setTitle(this@TwinSeekBarPreference.dialogTitle)
@@ -148,11 +157,7 @@ class TwinSeekBarPreference @JvmOverloads constructor(
                 setValue(primary, secondary)
             }
             .setNeutralButton(R.string.default_) { _, _ ->
-                default?.let { p ->
-                    secondaryDefault?.let { s ->
-                        setValue(p, s)
-                    }
-                }
+                setValue(default, secondaryDefault)
             }
             .setNegativeButton(android.R.string.cancel, null)
             .show()

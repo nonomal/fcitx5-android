@@ -1,3 +1,7 @@
+/*
+ * SPDX-License-Identifier: LGPL-2.1-or-later
+ * SPDX-FileCopyrightText: Copyright 2021-2023 Fcitx5 for Android Contributors
+ */
 package org.fcitx.fcitx5.android.core
 
 import android.os.Parcelable
@@ -14,6 +18,7 @@ data class InputMethodEntry(
     val nativeName: String,
     val label: String,
     val languageCode: String,
+    val addon: String,
     val isConfigurable: Boolean,
     val subMode: InputMethodSubMode
 ) {
@@ -24,6 +29,7 @@ data class InputMethodEntry(
         nativeName: String,
         label: String,
         languageCode: String,
+        addon: String,
         isConfigurable: Boolean
     ) : this(
         uniqueName,
@@ -32,6 +38,7 @@ data class InputMethodEntry(
         nativeName,
         label,
         languageCode,
+        addon,
         isConfigurable,
         InputMethodSubMode()
     )
@@ -43,6 +50,7 @@ data class InputMethodEntry(
         nativeName: String,
         label: String,
         languageCode: String,
+        addon: String,
         isConfigurable: Boolean,
         subMode: String,
         subModeLabel: String,
@@ -54,11 +62,12 @@ data class InputMethodEntry(
         nativeName,
         label,
         languageCode,
+        addon,
         isConfigurable,
         InputMethodSubMode(subMode, subModeLabel, subModeIcon)
     )
 
-    constructor(name: String) : this("", name, "", "", "×", "", false)
+    constructor(name: String) : this("", name, "", "", "×", "", "", false)
 
     val displayName: String
         get() = name.ifEmpty { uniqueName }
@@ -81,6 +90,20 @@ data class RawConfig(
 
     fun findByName(name: String): RawConfig? {
         return subItems?.find { it.name == name }
+    }
+
+    fun getOrCreate(name: String): RawConfig {
+        val items = subItems
+        return if (items == null) {
+            RawConfig(name, "", "", null).also {
+                subItems = arrayOf(it)
+            }
+        } else {
+            items.find { it.name == name }
+                ?: RawConfig(name, "", "", null).also {
+                    subItems = items + it
+                }
+        }
     }
 
     /**
@@ -119,8 +142,7 @@ enum class AddonCategory {
     InputMethod, Frontend, Loader, Module, UI;
 
     companion object {
-        private val Values = values()
-        fun fromInt(i: Int) = Values[i]
+        fun fromInt(i: Int) = entries[i]
     }
 }
 
@@ -238,3 +260,12 @@ data class Action(
         return result
     }
 }
+
+data class CandidateAction(
+    val id: Int,
+    val text: String,
+    val isSeparator: Boolean,
+    val icon: String,
+    val isCheckable: Boolean,
+    val isChecked: Boolean
+)

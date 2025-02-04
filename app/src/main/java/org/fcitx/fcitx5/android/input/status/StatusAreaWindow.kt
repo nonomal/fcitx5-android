@@ -1,29 +1,43 @@
+/*
+ * SPDX-License-Identifier: LGPL-2.1-or-later
+ * SPDX-FileCopyrightText: Copyright 2021-2023 Fcitx5 for Android Contributors
+ */
 package org.fcitx.fcitx5.android.input.status
 
+import android.os.Build
 import android.view.View
 import android.widget.PopupMenu
 import android.widget.Toast
+import androidx.core.text.buildSpannedString
+import androidx.core.text.color
 import androidx.lifecycle.lifecycleScope
+import kotlinx.coroutines.launch
 import org.fcitx.fcitx5.android.R
 import org.fcitx.fcitx5.android.core.Action
 import org.fcitx.fcitx5.android.daemon.FcitxConnection
-import org.fcitx.fcitx5.android.daemon.launchOnFcitxReady
+import org.fcitx.fcitx5.android.daemon.launchOnReady
+import org.fcitx.fcitx5.android.core.SubtypeManager
 import org.fcitx.fcitx5.android.data.prefs.AppPrefs
-import org.fcitx.fcitx5.android.data.theme.Theme
 import org.fcitx.fcitx5.android.data.theme.ThemeManager
 import org.fcitx.fcitx5.android.input.FcitxInputMethodService
-import org.fcitx.fcitx5.android.input.bar.ToolButton
+import org.fcitx.fcitx5.android.input.bar.ui.ToolButton
 import org.fcitx.fcitx5.android.input.broadcast.InputBroadcastReceiver
 import org.fcitx.fcitx5.android.input.dependency.fcitx
 import org.fcitx.fcitx5.android.input.dependency.inputMethodService
 import org.fcitx.fcitx5.android.input.dependency.theme
 import org.fcitx.fcitx5.android.input.editorinfo.EditorInfoWindow
-import org.fcitx.fcitx5.android.input.status.StatusAreaEntry.Android.Type.*
+import org.fcitx.fcitx5.android.input.status.StatusAreaEntry.Android.Type.InputMethod
+import org.fcitx.fcitx5.android.input.status.StatusAreaEntry.Android.Type.Keyboard
+import org.fcitx.fcitx5.android.input.status.StatusAreaEntry.Android.Type.ReloadConfig
+import org.fcitx.fcitx5.android.input.status.StatusAreaEntry.Android.Type.ThemeList
 import org.fcitx.fcitx5.android.input.wm.InputWindow
 import org.fcitx.fcitx5.android.input.wm.InputWindowManager
 import org.fcitx.fcitx5.android.utils.AppUtil
+import org.fcitx.fcitx5.android.utils.DeviceUtil
+import org.fcitx.fcitx5.android.utils.alpha
 import org.mechdancer.dependency.manager.must
 import splitties.dimensions.dp
+import splitties.resources.styledColor
 import splitties.views.backgroundColor
 import splitties.views.dsl.core.add
 import splitties.views.dsl.core.horizontalLayout
@@ -59,7 +73,7 @@ class StatusAreaWindow : InputWindow.ExtendedInputWindow<StatusAreaWindow>(),
                 ReloadConfig
             ),
             StatusAreaEntry.Android(
-                context.getString(R.string.keyboard),
+                context.getString(R.string.virtual_keyboard),
                 R.drawable.ic_baseline_keyboard_24,
                 Keyboard
             )
@@ -67,31 +81,59 @@ class StatusAreaWindow : InputWindow.ExtendedInputWindow<StatusAreaWindow>(),
     }
 
     private fun activateAction(action: Action) {
-        service.lifecycleScope.launchOnFcitxReady(fcitx) { f ->
-            f.activateAction(action.id)
+        fcitx.launchOnReady {
+            it.activateAction(action.id)
         }
     }
+
+    var popupMenu: PopupMenu? = null
 
     private val adapter: StatusAreaAdapter by lazy {
         object : StatusAreaAdapter() {
             override fun onItemClick(view: View, entry: StatusAreaEntry) {
                 when (entry) {
                     is StatusAreaEntry.Fcitx -> {
-                        val menu = entry.action.menu
-                        if (menu != null && menu.isNotEmpty()) {
-                            val popup = PopupMenu(context, view)
-                            menu.forEach { action ->
-                                popup.menu.add(action.shortText).apply {
-                                    setOnMenuItemClickListener {
-                                        activateAction(action)
+                        val actions = entry.action.menu
+                        if (actions.isNullOrEmpty()) {
+                            activateAction(entry.action)
+                            return
+                        }
+                        val popup = PopupMenu(context, view)
+                        val menu = popup.menu
+                        val hasDivider =
+                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P && !DeviceUtil.isHMOS && !DeviceUtil.isHonorMagicOS) {
+                                menu.setGroupDividerEnabled(true)
+                                true
+                            } else {
+                                false
+                            }
+                        var groupId = 0 // Menu.NONE; ungrouped
+                        actions.forEach {
+                            if (it.isSeparator) {
+                                if (hasDivider) {
+                                    groupId++
+                                } else {
+                                    val dividerString = buildSpannedString {
+                                        color(context.styledColor(android.R.attr.colorForeground).alpha(0.4f)) {
+                                            append("──────────")
+                                        }
+                                    }
+                                    menu.add(groupId, 0, 0, dividerString).apply {
+                                        isEnabled = false
+                                    }
+                                }
+                            } else {
+                                menu.add(groupId, 0, 0, it.shortText).apply {
+                                    setOnMenuItemClickListener { _ ->
+                                        activateAction(it)
                                         true
                                     }
                                 }
                             }
-                            popup.show()
-                        } else {
-                            activateAction(entry.action)
                         }
+                        popupMenu?.dismiss()
+                        popupMenu = popup
+                        popup.show()
                     }
                     is StatusAreaEntry.Android -> when (entry.type) {
                         InputMethod -> fcitx.runImmediately { inputMethodEntryCached }.let {
@@ -99,9 +141,14 @@ class StatusAreaWindow : InputWindow.ExtendedInputWindow<StatusAreaWindow>(),
                                 context, it.uniqueName, it.displayName
                             )
                         }
-                        ReloadConfig -> service.lifecycleScope.launchOnFcitxReady(fcitx) { f ->
+                        ReloadConfig -> fcitx.launchOnReady { f ->
                             f.reloadConfig()
-                            Toast.makeText(service, R.string.done, Toast.LENGTH_SHORT).show()
+                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                                SubtypeManager.syncWith(f.enabledIme())
+                            }
+                            service.lifecycleScope.launch {
+                                Toast.makeText(service, R.string.done, Toast.LENGTH_SHORT).show()
+                            }
                         }
                         Keyboard -> AppUtil.launchMainToKeyboard(context)
                         ThemeList -> AppUtil.launchMainToThemeList(context)
@@ -109,8 +156,7 @@ class StatusAreaWindow : InputWindow.ExtendedInputWindow<StatusAreaWindow>(),
                 }
             }
 
-            override val theme: Theme
-                get() = this@StatusAreaWindow.theme
+            override val theme = this@StatusAreaWindow.theme
         }
     }
 
@@ -129,7 +175,7 @@ class StatusAreaWindow : InputWindow.ExtendedInputWindow<StatusAreaWindow>(),
     override fun onStatusAreaUpdate(actions: Array<Action>) {
         adapter.entries = arrayOf(
             *staticEntries,
-            *actions.map { StatusAreaEntry.fromAction(it) }.toTypedArray()
+            *Array(actions.size) { StatusAreaEntry.fromAction(actions[it]) }
         )
     }
 
@@ -159,11 +205,16 @@ class StatusAreaWindow : InputWindow.ExtendedInputWindow<StatusAreaWindow>(),
     override fun onCreateBarExtension() = barExtension
 
     override fun onAttached() {
-        service.lifecycleScope.launchOnFcitxReady(fcitx) {
-            onStatusAreaUpdate(it.statusArea())
+        fcitx.launchOnReady {
+            val data = it.statusArea()
+            service.lifecycleScope.launch {
+                onStatusAreaUpdate(data)
+            }
         }
     }
 
     override fun onDetached() {
+        popupMenu?.dismiss()
+        popupMenu = null
     }
 }

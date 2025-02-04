@@ -1,66 +1,100 @@
+/*
+ * SPDX-License-Identifier: LGPL-2.1-or-later
+ * SPDX-FileCopyrightText: Copyright 2021-2023 Fcitx5 for Android Contributors
+ */
 package org.fcitx.fcitx5.android.ui.main.settings.theme
 
 import android.view.ViewGroup
 import androidx.recyclerview.widget.RecyclerView
 import org.fcitx.fcitx5.android.data.theme.Theme
 import splitties.views.dsl.core.Ui
+import kotlin.math.sign
 
 abstract class ThemeListAdapter : RecyclerView.Adapter<ThemeListAdapter.ViewHolder>() {
     class ViewHolder(val ui: Ui) : RecyclerView.ViewHolder(ui.root)
 
     val entries = mutableListOf<Theme>()
 
-    private var checkedIndex = -1
+    private var activeIndex = -1
+    private var lightIndex = -1
+    private var darkIndex = -1
 
     private fun entryAt(position: Int) = entries.getOrNull(position - OFFSET)
 
-    private fun positionOf(theme: Theme) = entries.indexOfFirst { it.name == theme.name } + OFFSET
+    private fun positionOf(theme: Theme? = null): Int {
+        if (theme == null) return -1
+        return entries.indexOfFirst { it.name == theme.name } + OFFSET
+    }
 
-    fun setThemes(themes: List<Theme>, active: Theme) {
+    fun setThemes(themes: List<Theme>) {
         entries.clear()
         entries.addAll(themes)
-        checkedIndex = entries.indexOf(active) + OFFSET
         notifyItemRangeInserted(OFFSET, themes.size)
     }
 
-    fun setCheckedTheme(theme: Theme) {
-        val oldChecked = entryAt(checkedIndex)
-        if (oldChecked == theme) return
-        notifyItemChanged(checkedIndex)
-        checkedIndex = positionOf(theme)
-        notifyItemChanged(checkedIndex)
+    fun setSelectedThemes(active: Theme, light: Theme? = null, dark: Theme? = null) {
+        val oldActive = entryAt(activeIndex)
+        if (oldActive != active) {
+            notifyItemChanged(activeIndex)
+            activeIndex = positionOf(active)
+            notifyItemChanged(activeIndex)
+        }
+        val oldLight = entryAt(lightIndex)
+        if (oldLight != light) {
+            notifyItemChanged(lightIndex)
+            lightIndex = positionOf(light)
+            if (lightIndex >= OFFSET) {
+                notifyItemChanged(lightIndex)
+            }
+        }
+        val oldDark = entryAt(darkIndex)
+        if (oldDark != dark) {
+            notifyItemChanged(darkIndex)
+            darkIndex = positionOf(dark)
+            if (darkIndex >= OFFSET) {
+                notifyItemChanged(darkIndex)
+            }
+        }
+    }
+
+    private fun prependOffset(index: Int): Int {
+        return if (index == -1) 0 else 1
     }
 
     fun prependTheme(it: Theme) {
         entries.add(0, it)
-        checkedIndex += 1
+        activeIndex += prependOffset(activeIndex)
+        lightIndex += prependOffset(lightIndex)
+        darkIndex += prependOffset(darkIndex)
         notifyItemInserted(OFFSET)
     }
 
-    fun replaceTheme(theme: Theme) {
-        val index = entries.indexOfFirst { it.name == theme.name }
-        entries[index] = theme
-        notifyItemChanged(index + OFFSET)
+    private fun removedOffset(removedIndex: Int, index: Int): Int {
+        return if (index == -1) 0 else (removedIndex - OFFSET - index).sign
     }
 
     fun removeTheme(name: String) {
         val index = entries.indexOfFirst { it.name == name }
         entries.removeAt(index)
         notifyItemRemoved(index + OFFSET)
-        val cmp = (index - OFFSET).compareTo(checkedIndex)
-        when {
-            cmp > 0 -> {
-                // Do nothing
-            }
-            cmp == 0 -> {
-                // Reset
-                checkedIndex = -1
-            }
-            cmp < 0 -> {
-                // Fix
-                checkedIndex -= 1
-            }
-        }
+        activeIndex += removedOffset(index, activeIndex)
+        lightIndex += removedOffset(index, lightIndex)
+        darkIndex += removedOffset(index, darkIndex)
+    }
+
+    private fun replaceIndex(replacedIndex: Int, index: Int): Int {
+        return if (replacedIndex + OFFSET == index) OFFSET else index
+    }
+
+    fun replaceTheme(theme: Theme) {
+        val index = entries.indexOfFirst { it.name == theme.name }
+        entries.removeAt(index)
+        entries.add(0, theme)
+        activeIndex = replaceIndex(index, activeIndex)
+        lightIndex = replaceIndex(index, lightIndex)
+        darkIndex = replaceIndex(index, darkIndex)
+        notifyItemMoved(index + OFFSET, OFFSET)
+        notifyItemChanged(OFFSET)
     }
 
     override fun onCreateViewHolder(parent: ViewGroup, viewType: Int) =
@@ -77,8 +111,15 @@ abstract class ThemeListAdapter : RecyclerView.Adapter<ThemeListAdapter.ViewHold
             ADD_THEME -> holder.ui.root.setOnClickListener { onAddNewTheme() }
             THEME -> (holder.ui as ThemeThumbnailUi).apply {
                 val theme = entryAt(position)!!
-                val isActive = position == checkedIndex
-                setTheme(theme, isActive)
+                setTheme(theme)
+                setChecked(
+                    when (position) {
+                        darkIndex -> ThemeThumbnailUi.State.DarkMode
+                        lightIndex -> ThemeThumbnailUi.State.LightMode
+                        activeIndex -> ThemeThumbnailUi.State.Selected
+                        else -> ThemeThumbnailUi.State.Normal
+                    }
+                )
                 root.setOnClickListener {
                     onSelectTheme(theme)
                 }

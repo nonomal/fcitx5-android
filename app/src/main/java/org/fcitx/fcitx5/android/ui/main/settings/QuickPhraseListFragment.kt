@@ -1,8 +1,12 @@
+/*
+ * SPDX-License-Identifier: LGPL-2.1-or-later
+ * SPDX-FileCopyrightText: Copyright 2021-2023 Fcitx5 for Android Contributors
+ */
 package org.fcitx.fcitx5.android.ui.main.settings
 
+import android.app.AlertDialog
 import android.app.NotificationChannel
 import android.app.NotificationManager
-import android.content.ContentResolver
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
@@ -11,19 +15,17 @@ import android.view.View
 import android.view.ViewGroup
 import androidx.activity.result.ActivityResultLauncher
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.appcompat.app.AlertDialog
+import androidx.appcompat.widget.PopupMenu
 import androidx.core.app.NotificationCompat
 import androidx.core.os.bundleOf
 import androidx.fragment.app.Fragment
 import androidx.fragment.app.activityViewModels
 import androidx.lifecycle.lifecycleScope
 import androidx.navigation.fragment.findNavController
-import arrow.core.None
-import arrow.core.Option
-import arrow.core.continuations.option
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import org.fcitx.fcitx5.android.R
 import org.fcitx.fcitx5.android.core.reloadQuickPhrase
 import org.fcitx.fcitx5.android.data.quickphrase.BuiltinQuickPhrase
@@ -34,41 +36,34 @@ import org.fcitx.fcitx5.android.ui.common.BaseDynamicListUi
 import org.fcitx.fcitx5.android.ui.common.OnItemChangedListener
 import org.fcitx.fcitx5.android.ui.main.MainViewModel
 import org.fcitx.fcitx5.android.utils.NaiveDustman
+import org.fcitx.fcitx5.android.utils.importErrorDialog
+import org.fcitx.fcitx5.android.utils.item
+import org.fcitx.fcitx5.android.utils.materialTextInput
+import org.fcitx.fcitx5.android.utils.notificationManager
+import org.fcitx.fcitx5.android.utils.onPositiveButtonClick
 import org.fcitx.fcitx5.android.utils.queryFileName
-import splitties.dimensions.dp
-import splitties.systemservices.notificationManager
-import splitties.views.dsl.constraintlayout.*
+import org.fcitx.fcitx5.android.utils.str
+import splitties.resources.drawable
+import splitties.resources.styledColor
 import splitties.views.dsl.core.add
-import splitties.views.dsl.core.editText
+import splitties.views.dsl.core.lParams
 import splitties.views.dsl.core.matchParent
-import splitties.views.dsl.core.wrapContent
-import splitties.views.imageResource
-import timber.log.Timber
-import java.io.File
+import splitties.views.dsl.core.verticalLayout
+import splitties.views.imageDrawable
+import splitties.views.setPaddingDp
 import java.util.concurrent.atomic.AtomicBoolean
-import kotlin.system.measureTimeMillis
 
 class QuickPhraseListFragment : Fragment(), OnItemChangedListener<QuickPhrase> {
 
     private val viewModel: MainViewModel by activityViewModels()
 
-    private val entries: List<QuickPhrase>
-        get() = ui.entries
-
-    private val contentResolver: ContentResolver
-        get() = requireContext().contentResolver
-
     private lateinit var launcher: ActivityResultLauncher<String>
 
     private val busy: AtomicBoolean = AtomicBoolean(false)
-    private val dustman = NaiveDustman<Boolean>().apply {
-        onDirty = {
-            viewModel.enableToolbarSaveButton { reloadQuickPhrase() }
-        }
-        onClean = {
-            viewModel.disableToolbarSaveButton()
-        }
-    }
+
+    private val dustman = NaiveDustman<Boolean>()
+
+    private var uiInitialized = false
 
     private val ui: BaseDynamicListUi<QuickPhrase> by lazy {
         object : BaseDynamicListUi<QuickPhrase>(
@@ -100,29 +95,26 @@ class QuickPhraseListFragment : Fragment(), OnItemChangedListener<QuickPhrase> {
                         dustman.forceDirty()
                     }
                 }
+
+                var icon = R.drawable.ic_baseline_settings_24
                 when (entry) {
                     is BuiltinQuickPhrase -> {
                         if (entry.override != null) {
-                            imageResource = R.drawable.ic_baseline_expand_more_24
+                            icon = R.drawable.ic_baseline_expand_more_24
                             setOnClickListener {
-                                val actions =
-                                    arrayOf(getString(R.string.edit), getString(R.string.reset))
-                                AlertDialog.Builder(requireContext())
-                                    .setItems(actions) { _, i ->
-                                        when (i) {
-                                            0 -> edit()
-                                            1 -> {
-                                                entry.deleteOverride()
-                                                ui.updateItem(ui.indexItem(entry), entry)
-                                                // not sure if the content changes
-                                                dustman.forceDirty()
-                                            }
-                                        }
+                                PopupMenu(requireContext(), this).apply {
+                                    menu.item(R.string.edit) { edit() }
+                                    menu.item(R.string.reset) {
+                                        entry.deleteOverride()
+                                        ui.updateItem(ui.indexItem(entry), entry)
+                                        // not sure if the content changes
+                                        dustman.forceDirty()
                                     }
-                                    .show()
+                                    show()
+                                }
                             }
                         } else {
-                            imageResource = R.drawable.ic_baseline_edit_24
+                            icon = R.drawable.ic_baseline_edit_24
                             setOnClickListener {
                                 edit()
                             }
@@ -130,59 +122,75 @@ class QuickPhraseListFragment : Fragment(), OnItemChangedListener<QuickPhrase> {
 
                     }
                     is CustomQuickPhrase -> {
-                        imageResource = R.drawable.ic_baseline_edit_24
+                        icon = R.drawable.ic_baseline_edit_24
                         setOnClickListener {
                             edit()
                         }
                     }
                 }
-
+                imageDrawable = drawable(icon)!!.apply {
+                    setTint(styledColor(android.R.attr.colorControlNormal))
+                }
             }
         ) {
             init {
                 enableUndo = false
+                shouldShowFab = true
                 fab.setOnClickListener {
                     // TODO use expandable fab instead
-                    val actions = arrayOf(
-                        getString(R.string.import_from_file),
-                        getString(R.string.create_new)
-                    )
-                    AlertDialog.Builder(requireContext())
-                        .setItems(actions) { _, i ->
-                            when (i) {
-                                0 -> {
-                                    launcher.launch("*/*")
-                                }
-                                1 -> {
-                                    val editText = editText {
-                                        setHint(R.string.name)
-                                    }
-                                    val layout = constraintLayout {
-                                        add(editText, lParams {
-                                            height = wrapContent
-                                            width = matchParent
-                                            topOfParent()
-                                            bottomOfParent()
-                                            leftOfParent(dp(20))
-                                            rightOfParent(dp(20))
-                                        })
-                                    }
-                                    AlertDialog.Builder(requireContext())
-                                        .setTitle(R.string.create_new)
-                                        .setView(layout)
-                                        .setPositiveButton(android.R.string.ok) { _, _ ->
-                                            ui.addItem(item = QuickPhraseManager.newEmpty(editText.text.toString()))
-                                        }
-                                        .setNegativeButton(android.R.string.cancel) { _, _ -> }
-                                        .show()
-                                }
-                                else -> {}
-                            }
-                        }
-                        .show()
-
-
+                    showImportOrCreateDialog()
                 }
+                setViewModel(viewModel)
+                // Builtin quick phrase shouldn't be removed
+                // But it can be disabled
+                removable = { e -> e !is BuiltinQuickPhrase }
+                addTouchCallback()
+            }
+
+            private fun showImportOrCreateDialog() {
+                val actions = arrayOf(
+                    getString(R.string.import_from_file),
+                    getString(R.string.create_new)
+                )
+                AlertDialog.Builder(requireContext())
+                    .setTitle(R.string.quickphrase_editor)
+                    .setItems(actions) { _, i ->
+                        when (i) {
+                            0 -> launcher.launch("*/*")
+                            1 -> showCreateQuickPhraseDialog()
+                        }
+                    }
+                    .setNegativeButton(android.R.string.cancel, null)
+                    .show()
+            }
+
+            private fun showCreateQuickPhraseDialog() {
+                val (inputLayout, editText) = materialTextInput {
+                    setHint(R.string.name)
+                }
+                val layout = verticalLayout {
+                    setPaddingDp(20, 10, 20, 0)
+                    add(inputLayout, lParams(matchParent))
+                }
+                AlertDialog.Builder(requireContext())
+                    .setTitle(R.string.create_new)
+                    .setView(layout)
+                    .setPositiveButton(android.R.string.ok, null)
+                    .setNegativeButton(android.R.string.cancel, null)
+                    .show()
+                    .onPositiveButtonClick onClick@{
+                        val name = editText.str.trim()
+                        if (name.isBlank()) {
+                            editText.error =
+                                getString(R.string._cannot_be_empty, getString(R.string.name))
+                            editText.requestFocus()
+                            return@onClick false
+                        } else {
+                            editText.error = null
+                        }
+                        ui.addItem(item = QuickPhraseManager.newEmpty(name))
+                        return@onClick true
+                    }
             }
 
             override fun updateFAB() {
@@ -192,10 +200,7 @@ class QuickPhraseListFragment : Fragment(), OnItemChangedListener<QuickPhrase> {
             override fun showEntry(x: QuickPhrase): String = x.name
 
         }.also {
-            // Builtin quick phrase shouldn't be removed
-            // But it can be disabled
-            it.removable = { e -> e !is BuiltinQuickPhrase }
-            it.addTouchCallback()
+            uiInitialized = true
         }
     }
 
@@ -206,7 +211,7 @@ class QuickPhraseListFragment : Fragment(), OnItemChangedListener<QuickPhrase> {
                 getText(R.string.quickphrase_editor),
                 NotificationManager.IMPORTANCE_HIGH
             ).apply { description = CHANNEL_ID }
-            notificationManager.createNotificationChannel(channel)
+            requireContext().notificationManager.createNotificationChannel(channel)
         }
     }
 
@@ -217,107 +222,74 @@ class QuickPhraseListFragment : Fragment(), OnItemChangedListener<QuickPhrase> {
         }
     }
 
-    private fun importFromUri(uri: Uri) =
+    private fun importFromUri(uri: Uri) {
+        val ctx = requireContext()
+        val cr = ctx.contentResolver
+        val nm = ctx.notificationManager
         lifecycleScope.launch(NonCancellable + Dispatchers.IO) {
             val id = IMPORT_ID++
-            option {
-                val file = uri.queryFileName(contentResolver).bind().let { File(it) }
-                when {
-                    file.nameWithoutExtension in entries.map { it.name } -> {
-                        errorDialog(getString(R.string.quickphrase_already_exists))
-                        shift(None)
-                    }
-                    file.extension != QuickPhrase.EXT -> {
-                        errorDialog(getString(R.string.invalid_quickphrase))
-                        shift(None)
-                    }
-                    else -> Unit
-                }
-
-                val builder =
-                    NotificationCompat.Builder(
-                        requireContext(),
-                        CHANNEL_ID
-                    )
-                        .setSmallIcon(R.drawable.ic_baseline_format_quote_24)
-                        .setContentTitle(getString(R.string.quickphrase_editor))
-                        .setContentText("${getString(R.string.importing)} ${file.nameWithoutExtension}")
-                        .setOngoing(true)
-                        .setProgress(100, 0, true)
-                        .setPriority(NotificationCompat.PRIORITY_HIGH)
-                builder.build().let { notificationManager.notify(id, it) }
-                val inputStream = Option.catch { contentResolver.openInputStream(uri) }
-                    .mapNotNull { it }
-                    .bind()
-                runCatching {
-                    val result: CustomQuickPhrase
-                    measureTimeMillis {
-                        inputStream.use { i ->
-                            result = QuickPhraseManager.importFromInputStream(
-                                i,
-                                file.name
-                            ).getOrThrow()
-                        }
-                    }.also { Timber.d("Took $it to import $result") }
-                    result
-                }
-                    .onFailure {
-                        errorDialog(it.localizedMessage ?: it.stackTraceToString())
-                    }
-                    .onSuccess {
-                        launch(Dispatchers.Main) {
-                            ui.addItem(item = it)
-                        }
-                    }
+            val fileName = cr.queryFileName(uri) ?: return@launch
+            val extName = fileName.substringAfterLast('.')
+            if (extName != QuickPhrase.EXT) {
+                ctx.importErrorDialog(R.string.exception_quickphrase_filename, fileName)
+                return@launch
             }
-            notificationManager.cancel(id)
-        }
-
-    private fun errorDialog(message: String) {
-        lifecycleScope.launch {
-            AlertDialog.Builder(requireContext())
-                .setTitle(R.string.import_error)
-                .setMessage(message)
-                .setPositiveButton(android.R.string.ok) { _, _ -> }
-                .setIconAttribute(android.R.attr.alertDialogIcon)
-                .show()
+            val entryName = fileName.substringBeforeLast('.')
+            if (ui.entries.any { it.name == entryName }) {
+                ctx.importErrorDialog(R.string.quickphrase_already_exists)
+                return@launch
+            }
+            NotificationCompat.Builder(ctx, CHANNEL_ID)
+                .setSmallIcon(R.drawable.ic_baseline_format_quote_24)
+                .setContentTitle(getString(R.string.quickphrase_editor))
+                .setContentText("${getString(R.string.importing)} $entryName")
+                .setOngoing(true)
+                .setProgress(100, 0, true)
+                .setPriority(NotificationCompat.PRIORITY_HIGH)
+                .build().let { nm.notify(id, it) }
+            try {
+                val inputStream = cr.openInputStream(uri)!!
+                val imported = QuickPhraseManager.importFromInputStream(inputStream, fileName)
+                    .getOrThrow()
+                withContext(Dispatchers.Main) {
+                    ui.addItem(item = imported)
+                }
+            } catch (e: Exception) {
+                ctx.importErrorDialog(e)
+            }
+            nm.cancel(id)
         }
     }
 
     private fun reloadQuickPhrase() {
-        if (!dustman.dirty)
-            return
+        if (!dustman.dirty) return
         resetDustman()
+        // save the reference to NotificationManager, in case we need to cancel notification
+        // after Fragment detached
+        val nm = requireContext().notificationManager
         lifecycleScope.launch(NonCancellable + Dispatchers.IO) {
             if (busy.compareAndSet(false, true)) {
-                val builder = NotificationCompat.Builder(
-                    requireContext(),
-                    CHANNEL_ID
-                )
+                val id = RELOAD_ID++
+                NotificationCompat.Builder(requireContext(), CHANNEL_ID)
                     .setSmallIcon(R.drawable.ic_baseline_library_books_24)
                     .setContentTitle(getString(R.string.quickphrase_editor))
                     .setContentText(getString(R.string.reloading))
                     .setOngoing(true)
                     .setProgress(100, 0, true)
                     .setPriority(NotificationCompat.PRIORITY_HIGH)
-                val id = RELOAD_ID++
-                builder.build().let { notificationManager.notify(id, it) }
-                measureTimeMillis {
-                    viewModel.fcitx.runOnReady { reloadQuickPhrase() }
-                }.let { Timber.d("Took $it to reload quickphrase") }
-                notificationManager.cancel(id)
+                    .build().let { nm.notify(id, it) }
+                viewModel.fcitx.runOnReady {
+                    reloadQuickPhrase()
+                }
+                nm.cancel(id)
                 busy.set(false)
             }
         }
     }
 
-
     private fun resetDustman() {
-        dustman.reset(entries.associate {
-            it.name to it.isEnabled
-        })
+        dustman.reset(ui.entries.associate { it.name to it.isEnabled })
     }
-
 
     override fun onCreateView(
         inflater: LayoutInflater,
@@ -348,23 +320,29 @@ class QuickPhraseListFragment : Fragment(), OnItemChangedListener<QuickPhrase> {
         dustman.addOrUpdate(new.name, new.isEnabled)
     }
 
-    override fun onResume() {
-        super.onResume()
-        viewModel.disableToolbarSaveButton()
-        viewModel.setToolbarTitle(getString(R.string.quickphrase_editor))
-        viewModel.enableToolbarEditButton {
-            ui.enterMultiSelect(
-                requireActivity().onBackPressedDispatcher,
-                viewModel
-            )
+    override fun onStart() {
+        super.onStart()
+        if (uiInitialized) {
+            viewModel.enableToolbarEditButton(ui.entries.isNotEmpty()) {
+                ui.enterMultiSelect(requireActivity().onBackPressedDispatcher)
+            }
         }
     }
 
-    override fun onPause() {
+    override fun onStop() {
         reloadQuickPhrase()
-        ui.exitMultiSelect(viewModel)
         viewModel.disableToolbarEditButton()
-        super.onPause()
+        if (uiInitialized) {
+            ui.exitMultiSelect()
+        }
+        super.onStop()
+    }
+
+    override fun onDestroy() {
+        if (uiInitialized) {
+            ui.removeItemChangedListener()
+        }
+        super.onDestroy()
     }
 
     companion object {

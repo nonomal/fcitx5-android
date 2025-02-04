@@ -1,12 +1,14 @@
+/*
+ * SPDX-License-Identifier: LGPL-2.1-or-later
+ * SPDX-FileCopyrightText: Copyright 2021-2023 Fcitx5 for Android Contributors
+ */
 package org.fcitx.fcitx5.android.ui.main.settings
 
 import android.app.AlertDialog
 import android.view.View
+import android.view.inputmethod.EditorInfo
 import androidx.core.os.bundleOf
-import androidx.fragment.app.setFragmentResult
 import androidx.lifecycle.lifecycleScope
-import com.google.android.material.textfield.TextInputEditText
-import com.google.android.material.textfield.TextInputLayout
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.launch
@@ -18,54 +20,52 @@ import org.fcitx.fcitx5.android.data.quickphrase.QuickPhraseEntry
 import org.fcitx.fcitx5.android.ui.common.BaseDynamicListUi
 import org.fcitx.fcitx5.android.ui.common.OnItemChangedListener
 import org.fcitx.fcitx5.android.utils.NaiveDustman
+import org.fcitx.fcitx5.android.utils.materialTextInput
+import org.fcitx.fcitx5.android.utils.onPositiveButtonClick
 import org.fcitx.fcitx5.android.utils.serializable
 import org.fcitx.fcitx5.android.utils.str
-import splitties.views.dsl.core.*
-import splitties.views.dsl.material.addInput
+import splitties.views.dsl.core.add
+import splitties.views.dsl.core.lParams
+import splitties.views.dsl.core.matchParent
+import splitties.views.dsl.core.verticalLayout
 import splitties.views.setPaddingDp
 
 class QuickPhraseEditFragment : ProgressFragment(), OnItemChangedListener<QuickPhraseEntry> {
 
     private lateinit var ui: BaseDynamicListUi<QuickPhraseEntry>
 
-    private val entries: List<QuickPhraseEntry>
-        get() = ui.entries
-
     private lateinit var quickPhrase: QuickPhrase
 
-    private val dustman = NaiveDustman<QuickPhraseEntry>().apply {
-        onDirty = {
-            viewModel.enableToolbarSaveButton { saveConfig() }
-        }
-        onClean = {
-            viewModel.disableToolbarSaveButton()
-        }
-    }
+    private val dustman = NaiveDustman<QuickPhraseEntry>()
 
     override suspend fun initialize(): View {
         quickPhrase = requireArguments().serializable(ARG)!!
         val initialEntries = withContext(Dispatchers.IO) {
-            quickPhrase.loadData().getOrThrow()
+            quickPhrase.loadData()
         }
         ui = object : BaseDynamicListUi<QuickPhraseEntry>(
             requireContext(),
             Mode.FreeAdd("", converter = { QuickPhraseEntry("", "") }),
             initialEntries,
         ) {
+            override fun showEntry(x: QuickPhraseEntry): String = x.run {
+                "$keyword → ${phrase.replace("\n", "\\n")}"
+            }
+
             override fun showEditDialog(
                 title: String,
                 entry: QuickPhraseEntry?,
                 block: (QuickPhraseEntry) -> Unit
             ) {
-                val keywordField: TextInputEditText
-                val keywordLayout = view(::TextInputLayout).apply {
+                val (keywordLayout, keywordField) = materialTextInput {
                     setHint(R.string.quickphrase_keyword)
-                    keywordField = addInput(View.NO_ID)
                 }
-                val phraseField: TextInputEditText
-                val phraseLayout = view(::TextInputLayout).apply {
+                keywordField.apply {
+                    isSingleLine = true
+                    imeOptions = EditorInfo.IME_ACTION_NEXT
+                }
+                val (phraseLayout, phraseField) = materialTextInput {
                     setHint(R.string.quickphrase_phrase)
-                    phraseField = addInput(View.NO_ID)
                 }
                 entry?.apply {
                     keywordField.setText(keyword)
@@ -79,25 +79,46 @@ class QuickPhraseEditFragment : ProgressFragment(), OnItemChangedListener<QuickP
                 AlertDialog.Builder(context)
                     .setTitle(title)
                     .setView(layout)
-                    .setPositiveButton(android.R.string.ok) { _, _ ->
-                        block(QuickPhraseEntry(keywordField.str, phraseField.str))
-                    }
+                    .setPositiveButton(android.R.string.ok, null)
                     .setNegativeButton(android.R.string.cancel, null)
                     .show()
-            }
-
-            override fun showEntry(x: QuickPhraseEntry): String = x.run {
-                "$keyword\u2003→\u2003$phrase"
+                    .onPositiveButtonClick onClick@{
+                        val keyword = keywordField.str.trim()
+                        // "keyword" cannot contain any black characters
+                        if (keyword.isBlank()) {
+                            keywordField.error = getString(
+                                R.string._cannot_be_empty,
+                                getString(R.string.quickphrase_keyword)
+                            )
+                            keywordField.requestFocus()
+                            return@onClick false
+                        } else {
+                            keywordField.error = null
+                        }
+                        // "phrase" may contain blank characters
+                        val phrase = phraseField.str
+                        if (phrase.isEmpty()) {
+                            phraseField.error = getString(
+                                R.string._cannot_be_empty,
+                                getString(R.string.quickphrase_phrase)
+                            )
+                            phraseField.requestFocus()
+                            return@onClick false
+                        } else {
+                            phraseField.error = null
+                        }
+                        block(QuickPhraseEntry(keyword, phraseField.str))
+                        return@onClick true
+                    }
+                    .setCanceledOnTouchOutside(false)
             }
         }
         ui.addOnItemChangedListener(this)
         ui.addTouchCallback()
         resetDustman()
-        viewModel.enableToolbarEditButton {
-            ui.enterMultiSelect(
-                requireActivity().onBackPressedDispatcher,
-                viewModel
-            )
+        ui.setViewModel(viewModel)
+        viewModel.enableToolbarEditButton(initialEntries.isNotEmpty()) {
+            ui.enterMultiSelect(requireActivity().onBackPressedDispatcher)
         }
         return ui.root
     }
@@ -122,43 +143,45 @@ class QuickPhraseEditFragment : ProgressFragment(), OnItemChangedListener<QuickP
     }
 
     private fun saveConfig() {
-        if (!dustman.dirty)
-            return
+        if (!dustman.dirty) return
         resetDustman()
         lifecycleScope.launch(NonCancellable + Dispatchers.IO) {
-            quickPhrase.saveData(
-                QuickPhraseData(entries)
-            )
+            quickPhrase.saveData(QuickPhraseData(ui.entries))
             launch(Dispatchers.Main) {
                 // tell parent that we need to reload
-                setFragmentResult(RESULT, bundleOf(RESULT to true))
+                parentFragmentManager.setFragmentResult(RESULT, bundleOf(RESULT to true))
             }
         }
     }
 
     private fun resetDustman() {
-        dustman.reset(entries.associateBy { it.serialize() })
+        dustman.reset(ui.entries.associateBy { it.serialize() })
     }
 
-    override fun onResume() {
-        super.onResume()
-        viewModel.disableToolbarSaveButton()
+    override fun onStart() {
+        super.onStart()
         viewModel.setToolbarTitle(quickPhrase.name)
-
-        if (::ui.isInitialized)
-            viewModel.enableToolbarEditButton {
-                ui.enterMultiSelect(
-                    requireActivity().onBackPressedDispatcher,
-                    viewModel
-                )
+        if (isInitialized) {
+            viewModel.enableToolbarEditButton(ui.entries.isNotEmpty()) {
+                ui.enterMultiSelect(requireActivity().onBackPressedDispatcher)
             }
+        }
     }
 
-    override fun onPause() {
+    override fun onStop() {
         saveConfig()
-        ui.exitMultiSelect(viewModel)
+        if (isInitialized) {
+            ui.exitMultiSelect()
+        }
         viewModel.disableToolbarEditButton()
-        super.onPause()
+        super.onStop()
+    }
+
+    override fun onDestroy() {
+        if (isInitialized) {
+            ui.removeItemChangedListener()
+        }
+        super.onDestroy()
     }
 
     companion object {

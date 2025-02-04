@@ -1,3 +1,7 @@
+/*
+ * SPDX-License-Identifier: LGPL-2.1-or-later
+ * SPDX-FileCopyrightText: Copyright 2021-2023 Fcitx5 for Android Contributors
+ */
 package org.fcitx.fcitx5.android.core
 
 import kotlinx.coroutines.flow.SharedFlow
@@ -9,7 +13,6 @@ import kotlinx.coroutines.flow.SharedFlow
  * as the underlying operation is always dispatched in fcitx thread.
  */
 interface FcitxAPI {
-
 
     enum class AddonDep {
         Required,
@@ -27,6 +30,10 @@ interface FcitxAPI {
 
     val statusAreaActionsCached: Array<Action>
 
+    val clientPreeditCached: FormattedText
+
+    val inputPanelCached: FcitxEvent.InputPanelEvent.Data
+
     fun getAddonReverseDependencies(addon: String): List<Pair<String, AddonDep>>
 
     fun translate(str: String, domain: String = "fcitx5"): String
@@ -35,13 +42,13 @@ interface FcitxAPI {
 
     suspend fun reloadConfig()
 
-    suspend fun sendKey(key: String, states: UInt = 0u, up: Boolean = false, timestamp: Int = -1)
+    suspend fun sendKey(key: String, states: UInt = 0u, code: Int = 0, up: Boolean = false, timestamp: Int = -1)
 
-    suspend fun sendKey(c: Char, states: UInt = 0u, up: Boolean = false, timestamp: Int = -1)
+    suspend fun sendKey(c: Char, states: UInt = 0u, code: Int = 0, up: Boolean = false, timestamp: Int = -1)
 
-    suspend fun sendKey(sym: Int, states: UInt = 0u, up: Boolean = false, timestamp: Int = -1)
+    suspend fun sendKey(sym: Int, states: UInt = 0u, code: Int = 0, up: Boolean = false, timestamp: Int = -1)
 
-    suspend fun sendKey(sym: KeySym, states: KeyStates, up: Boolean = false, timestamp: Int = -1)
+    suspend fun sendKey(sym: KeySym, states: KeyStates, code: Int = 0, up: Boolean = false, timestamp: Int = -1)
 
     suspend fun select(idx: Int): Boolean
     suspend fun isEmpty(): Boolean
@@ -82,12 +89,20 @@ interface FcitxAPI {
     suspend fun triggerUnicode()
 
     suspend fun focus(focus: Boolean = true)
-    suspend fun activate(uid: Int)
+    suspend fun activate(uid: Int, pkgName: String)
     suspend fun deactivate(uid: Int)
     suspend fun setCapFlags(flags: CapabilityFlags)
 
     suspend fun statusArea(): Array<Action>
 
     suspend fun activateAction(id: Int)
+
+    suspend fun getCandidates(offset: Int, limit: Int): Array<String>
+
+    suspend fun getCandidateActions(idx: Int): Array<CandidateAction>
+    suspend fun triggerCandidateAction(idx: Int, actionIdx: Int)
+
+    suspend fun setCandidatePagingMode(mode: Int)
+    suspend fun offsetCandidatePage(delta: Int)
 
 }

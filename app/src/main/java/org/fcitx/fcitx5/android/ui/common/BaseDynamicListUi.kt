@@ -1,15 +1,23 @@
+/*
+ * SPDX-License-Identifier: LGPL-2.1-or-later
+ * SPDX-FileCopyrightText: Copyright 2021-2023 Fcitx5 for Android Contributors
+ */
 package org.fcitx.fcitx5.android.ui.common
 
+import android.annotation.SuppressLint
+import android.app.AlertDialog
 import android.content.Context
-import android.graphics.PorterDuff
-import android.graphics.PorterDuffColorFilter
 import android.view.View
 import android.view.ViewGroup
 import android.widget.CheckBox
 import android.widget.ImageButton
-import androidx.appcompat.app.AlertDialog
+import androidx.activity.OnBackPressedDispatcher
 import androidx.coordinatorlayout.widget.CoordinatorLayout
-import androidx.core.view.*
+import androidx.core.view.ViewCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.doOnAttach
+import androidx.core.view.isVisible
+import androidx.core.view.updateLayoutParams
 import androidx.core.widget.addTextChangedListener
 import androidx.recyclerview.widget.ItemTouchHelper
 import arrow.core.identity
@@ -18,17 +26,31 @@ import com.google.android.material.floatingactionbutton.FloatingActionButton
 import com.google.android.material.snackbar.BaseTransientBottomBar
 import com.google.android.material.snackbar.Snackbar
 import org.fcitx.fcitx5.android.R
+import org.fcitx.fcitx5.android.utils.onPositiveButtonClick
+import org.fcitx.fcitx5.android.utils.str
 import splitties.dimensions.dp
+import splitties.resources.drawable
 import splitties.resources.styledColor
 import splitties.views.backgroundColor
 import splitties.views.bottomPadding
-import splitties.views.dsl.constraintlayout.*
+import splitties.views.dsl.constraintlayout.bottomOfParent
+import splitties.views.dsl.constraintlayout.constraintLayout
+import splitties.views.dsl.constraintlayout.lParams
+import splitties.views.dsl.constraintlayout.leftOfParent
+import splitties.views.dsl.constraintlayout.rightOfParent
+import splitties.views.dsl.constraintlayout.topOfParent
 import splitties.views.dsl.coordinatorlayout.coordinatorLayout
 import splitties.views.dsl.coordinatorlayout.defaultLParams
-import splitties.views.dsl.core.*
+import splitties.views.dsl.core.Ui
+import splitties.views.dsl.core.add
+import splitties.views.dsl.core.editText
+import splitties.views.dsl.core.margin
+import splitties.views.dsl.core.matchParent
+import splitties.views.dsl.core.view
+import splitties.views.dsl.core.wrapContent
 import splitties.views.dsl.recyclerview.recyclerView
 import splitties.views.gravityEndBottom
-import splitties.views.imageResource
+import splitties.views.imageDrawable
 import splitties.views.recyclerview.verticalLayoutManager
 import kotlin.math.min
 
@@ -49,11 +71,12 @@ abstract class BaseDynamicListUi<T>(
         initSettingsButton
     ) {
 
+    protected var shouldShowFab = false
+
     protected val fab = view(::FloatingActionButton) {
-        imageResource = R.drawable.ic_baseline_plus_24
-        colorFilter = PorterDuffColorFilter(
-            styledColor(android.R.attr.colorForegroundInverse), PorterDuff.Mode.SRC_IN
-        )
+        imageDrawable = drawable(R.drawable.ic_baseline_plus_24)!!.apply {
+            setTint(styledColor(android.R.attr.colorForegroundInverse))
+        }
     }
 
     sealed class Mode<T> {
@@ -85,8 +108,15 @@ abstract class BaseDynamicListUi<T>(
         }
     }
 
-
+    /**
+     * whether to show "undo" snackbar after item update
+     */
     var enableUndo = true
+
+    /**
+     * suspend "undo" snackbar temporarily to prevent undo undo
+     */
+    private var suspendUndo = false
 
     init {
         initEditButton = when (mode) {
@@ -127,13 +157,23 @@ abstract class BaseDynamicListUi<T>(
 
             override fun onItemRemovedBatch(indexed: List<Pair<Int, T>>) {
                 updateFAB()
+                showUndoSnackbar(ctx.getString(R.string.removed_n_items, indexed.size)) {
+                    indexed.sortedBy { it.first }.forEach {
+                        addItem(it.first, it.second)
+                    }
+                }
             }
         })
     }
 
-    private fun showUndoSnackbar(text: String, action: View.OnClickListener) {
+    private fun showUndoSnackbar(text: String, action: () -> Unit) {
+        if (!enableUndo || suspendUndo) return
         Snackbar.make(root, text, Snackbar.LENGTH_SHORT)
-            .apply { if (enableUndo) setAction(R.string.undo, action) }
+            .setAction(R.string.undo) {
+                suspendUndo = true
+                action.invoke()
+                suspendUndo = false
+            }
             .addCallback(object : BaseTransientBottomBar.BaseCallback<Snackbar>() {
                 override fun onShown(transientBottomBar: Snackbar) {
                     // snackbar is invisible when it attached to parent,
@@ -151,8 +191,10 @@ abstract class BaseDynamicListUi<T>(
             is Mode.ChooseOne -> {
                 val candidatesSource = mode.candidatesSource(this)
                 if (candidatesSource.isEmpty()) {
+                    shouldShowFab = false
                     fab.hide()
                 } else {
+                    shouldShowFab = true
                     fab.show()
                     fab.setOnClickListener {
                         val items = candidatesSource.map { showEntry(it) }.toTypedArray()
@@ -164,15 +206,33 @@ abstract class BaseDynamicListUi<T>(
                 }
             }
             is Mode.FreeAdd -> {
+                shouldShowFab = true
                 fab.show()
                 fab.setOnClickListener {
                     showEditDialog(ctx.getString(R.string.add)) { addItem(item = it) }
                 }
             }
-            is Mode.Immutable -> fab.hide()
+            is Mode.Immutable -> {
+                shouldShowFab = false
+                fab.hide()
+            }
             is Mode.Custom -> {
             }
         }
+    }
+
+    override fun enterMultiSelect(onBackPressedDispatcher: OnBackPressedDispatcher) {
+        if (shouldShowFab) {
+            fab.hide()
+        }
+        super.enterMultiSelect(onBackPressedDispatcher)
+    }
+
+    override fun exitMultiSelect() {
+        if (shouldShowFab) {
+            fab.show()
+        }
+        super.exitMultiSelect()
     }
 
     open fun showEditDialog(
@@ -198,25 +258,24 @@ abstract class BaseDynamicListUi<T>(
                 rightOfParent(dp(20))
             })
         }
-        val dialog = AlertDialog.Builder(ctx)
+        AlertDialog.Builder(ctx)
             .setTitle(title)
             .setView(layout)
-            .setPositiveButton(android.R.string.ok) { _, _ ->
-            }
-            .setNegativeButton(android.R.string.cancel) { dialog, _ ->
-                dialog.cancel()
-            }
+            .setPositiveButton(android.R.string.ok, null)
+            .setNegativeButton(android.R.string.cancel, null)
             .show()
-        editText.requestFocus()
-        dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
-            val t = editText.editableText.toString()
-            if (mode.validator(t)) {
-                block(mode.converter(t))
-                dialog.dismiss()
-            } else {
-                editText.error = ctx.getString(R.string.invalid_value)
+            .onPositiveButtonClick {
+                val str = editText.str
+                if (mode.validator(str)) {
+                    editText.error = null
+                    block(mode.converter(str))
+                    true
+                } else {
+                    editText.error = ctx.getString(R.string.invalid_value)
+                    false
+                }
             }
-        }
+        editText.requestFocus()
     }
 
     protected val recyclerView = recyclerView {
@@ -226,8 +285,7 @@ abstract class BaseDynamicListUi<T>(
     }
 
     fun addTouchCallback(
-        touchCallback: DynamicListTouchCallback<T> =
-            DynamicListTouchCallback(this@BaseDynamicListUi)
+        touchCallback: DynamicListTouchCallback<T> = DynamicListTouchCallback(ctx, this)
     ) {
         itemTouchHelper = ItemTouchHelper(touchCallback).also {
             it.attachToRecyclerView(recyclerView)
@@ -253,6 +311,7 @@ abstract class BaseDynamicListUi<T>(
             gravity = gravityEndBottom
             margin = dp(16)
             behavior = object : HideBottomViewOnScrollBehavior<FloatingActionButton>() {
+                @SuppressLint("RestrictedApi")
                 override fun layoutDependsOn(
                     parent: CoordinatorLayout,
                     child: FloatingActionButton,

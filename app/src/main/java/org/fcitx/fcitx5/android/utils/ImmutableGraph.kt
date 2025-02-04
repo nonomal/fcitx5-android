@@ -1,6 +1,11 @@
+/*
+ * SPDX-License-Identifier: LGPL-2.1-or-later
+ * SPDX-FileCopyrightText: Copyright 2021-2023 Fcitx5 for Android Contributors
+ */
 package org.fcitx.fcitx5.android.utils
 
-import java.util.*
+import java.util.LinkedList
+import java.util.Queue
 
 class ImmutableGraph<V, L>(
     edges: List<Edge<V, L>>
@@ -24,32 +29,30 @@ class ImmutableGraph<V, L>(
         }
     }
 
-    fun getEdgesOfVertexWithIndex(vertex: V) = adjacencyMatrix[vertices.indexOf(vertex)]
-        .asIterable()
-        .mapIndexedNotNull { v2Idx, labelIdx ->
-            labelIdx.takeIf { it != -1 }?.run {
-                (v2Idx to labelIdx) to Edge(vertex, vertices[v2Idx], labels[labelIdx])
-            }
-        }
-
-    fun bfs(vertex: V): List<Pair<V, L>> {
+    /**
+     * @param predicate: whether to continue searching after this node
+     */
+    fun bfs(vertex: V, predicate: (Int, V, L) -> Boolean = { _, _, _ -> true }): List<Pair<V, L>> {
         val start = vertices.indexOf(vertex).takeIf { it != -1 } ?: return emptyList()
         val visited = BooleanArray(vertices.size)
-        val queue: Queue<Pair<Int, Int>> = LinkedList()
+        val queue: Queue<Triple<Int, Int, Boolean>> = LinkedList()
         val result = mutableListOf<Pair<Int, Int>>()
+        var level = 0
         visited[start] = true
-        queue.add(start to -1)
+        queue.add(Triple(start, -1, true))
         while (queue.isNotEmpty()) {
-            val (x, v) = queue.remove()
+            val (x, v, cont) = queue.remove()
             if (start != x)
                 result.add(x to v)
-            visited.indices.forEach { i ->
-                val l = adjacencyMatrix[x][i].takeIf { it != -1 }
-                if (l != null && !visited[i]) {
-                    queue.add(i to l)
-                    visited[i] = true
+            if (cont)
+                visited.indices.forEach { i ->
+                    val l = adjacencyMatrix[x][i].takeIf { it != -1 }
+                    if (l != null && !visited[i]) {
+                        queue.add(Triple(i, l, predicate(level, vertices[i], labels[l])))
+                        visited[i] = true
+                    }
                 }
-            }
+            level++
         }
         return result.map { (v, l) -> vertices[v] to labels[l] }
     }

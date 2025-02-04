@@ -1,9 +1,16 @@
+/*
+ * SPDX-License-Identifier: LGPL-2.1-or-later
+ * SPDX-FileCopyrightText: Copyright 2021-2023 Fcitx5 for Android Contributors
+ */
 package org.fcitx.fcitx5.android.input.broadcast
 
 import android.view.inputmethod.EditorInfo
+import androidx.annotation.DrawableRes
 import org.fcitx.fcitx5.android.core.Action
-import org.fcitx.fcitx5.android.core.FcitxEvent.InputPanelAuxEvent
-import org.fcitx.fcitx5.android.core.FcitxEvent.PreeditEvent
+import org.fcitx.fcitx5.android.core.CapabilityFlags
+import org.fcitx.fcitx5.android.core.FcitxEvent.CandidateListEvent
+import org.fcitx.fcitx5.android.core.FcitxEvent.InputPanelEvent
+import org.fcitx.fcitx5.android.core.FormattedText
 import org.fcitx.fcitx5.android.core.InputMethodEntry
 import org.fcitx.fcitx5.android.input.wm.InputWindow
 import org.mechdancer.dependency.DynamicScope
@@ -12,15 +19,15 @@ interface InputBroadcastReceiver {
 
     fun onScopeSetupFinished(scope: DynamicScope) {}
 
-    fun onEditorInfoUpdate(info: EditorInfo?) {}
+    fun onStartInput(info: EditorInfo, capFlags: CapabilityFlags) {}
 
-    fun onPreeditUpdate(data: PreeditEvent.Data) {}
+    fun onClientPreeditUpdate(data: FormattedText) {}
 
-    fun onInputPanelAuxUpdate(data: InputPanelAuxEvent.Data) {}
+    fun onInputPanelUpdate(data: InputPanelEvent.Data) {}
 
     fun onImeUpdate(ime: InputMethodEntry) {}
 
-    fun onCandidateUpdate(data: Array<String>) {}
+    fun onCandidateUpdate(data: CandidateListEvent.Data) {}
 
     fun onStatusAreaUpdate(actions: Array<Action>) {}
 
@@ -31,5 +38,9 @@ interface InputBroadcastReceiver {
     fun onWindowDetached(window: InputWindow) {}
 
     fun onPunctuationUpdate(mapping: Map<String, String>) {}
+
+    fun onPreeditEmptyStateUpdate(empty: Boolean) {}
+
+    fun onReturnKeyDrawableUpdate(@DrawableRes resourceId: Int) {}
 
 }

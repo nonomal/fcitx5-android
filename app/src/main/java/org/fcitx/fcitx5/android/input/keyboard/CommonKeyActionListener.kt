@@ -1,23 +1,40 @@
+/*
+ * SPDX-License-Identifier: LGPL-2.1-or-later
+ * SPDX-FileCopyrightText: Copyright 2021-2024 Fcitx5 for Android Contributors
+ */
+
 package org.fcitx.fcitx5.android.input.keyboard
 
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.lifecycleScope
+import kotlinx.coroutines.launch
 import org.fcitx.fcitx5.android.core.FcitxAPI
-import org.fcitx.fcitx5.android.core.KeyState
-import org.fcitx.fcitx5.android.daemon.launchOnFcitxReady
+import org.fcitx.fcitx5.android.daemon.launchOnReady
 import org.fcitx.fcitx5.android.data.prefs.AppPrefs
+import org.fcitx.fcitx5.android.input.broadcast.PreeditEmptyStateComponent
+import org.fcitx.fcitx5.android.input.candidates.horizontal.HorizontalCandidateComponent
 import org.fcitx.fcitx5.android.input.dependency.context
 import org.fcitx.fcitx5.android.input.dependency.fcitx
 import org.fcitx.fcitx5.android.input.dependency.inputMethodService
-import org.fcitx.fcitx5.android.input.dependency.inputView
 import org.fcitx.fcitx5.android.input.dialog.AddMoreInputMethodsPrompt
-import org.fcitx.fcitx5.android.input.dialog.InputMethodSwitcherDialog
-import org.fcitx.fcitx5.android.input.keyboard.CommonKeyActionListener.BackspaceSwipeState.*
-import org.fcitx.fcitx5.android.input.keyboard.KeyAction.*
+import org.fcitx.fcitx5.android.input.dialog.InputMethodPickerDialog
+import org.fcitx.fcitx5.android.input.keyboard.CommonKeyActionListener.BackspaceSwipeState.Reset
+import org.fcitx.fcitx5.android.input.keyboard.CommonKeyActionListener.BackspaceSwipeState.Selection
+import org.fcitx.fcitx5.android.input.keyboard.CommonKeyActionListener.BackspaceSwipeState.Stopped
+import org.fcitx.fcitx5.android.input.keyboard.KeyAction.CommitAction
+import org.fcitx.fcitx5.android.input.keyboard.KeyAction.DeleteSelectionAction
+import org.fcitx.fcitx5.android.input.keyboard.KeyAction.FcitxKeyAction
+import org.fcitx.fcitx5.android.input.keyboard.KeyAction.LangSwitchAction
+import org.fcitx.fcitx5.android.input.keyboard.KeyAction.MoveSelectionAction
+import org.fcitx.fcitx5.android.input.keyboard.KeyAction.PickerSwitchAction
+import org.fcitx.fcitx5.android.input.keyboard.KeyAction.QuickPhraseAction
+import org.fcitx.fcitx5.android.input.keyboard.KeyAction.ShowInputMethodPickerAction
+import org.fcitx.fcitx5.android.input.keyboard.KeyAction.SpaceLongPressAction
+import org.fcitx.fcitx5.android.input.keyboard.KeyAction.SymAction
+import org.fcitx.fcitx5.android.input.keyboard.KeyAction.UnicodeAction
 import org.fcitx.fcitx5.android.input.picker.PickerWindow
-import org.fcitx.fcitx5.android.input.preedit.PreeditComponent
 import org.fcitx.fcitx5.android.input.wm.InputWindowManager
-import org.fcitx.fcitx5.android.utils.inputConnection
+import org.fcitx.fcitx5.android.utils.switchToNextIME
 import org.mechdancer.dependency.Dependent
 import org.mechdancer.dependency.UniqueComponent
 import org.mechdancer.dependency.manager.ManagedHandler
@@ -34,63 +51,94 @@ class CommonKeyActionListener :
     private val context by manager.context()
     private val fcitx by manager.fcitx()
     private val service by manager.inputMethodService()
-    private val inputView by manager.inputView()
+    private val preeditState: PreeditEmptyStateComponent by manager.must()
+    private val horizontalCandidate: HorizontalCandidateComponent by manager.must()
     private val windowManager: InputWindowManager by manager.must()
-    private val preedit: PreeditComponent by manager.must()
 
     private var lastPickerType by AppPrefs.getInstance().internal.lastPickerType
 
+    private val kbdPrefs = AppPrefs.getInstance().keyboard
+
+    private val spaceKeyLongPressBehavior by kbdPrefs.spaceKeyLongPressBehavior
+    private val langSwitchKeyBehavior by kbdPrefs.langSwitchKeyBehavior
+
     private var backspaceSwipeState = Stopped
 
+    private val keepComposingIMs = arrayOf("keyboard-us", "unikey")
+
     private suspend fun FcitxAPI.commitAndReset() {
-        if (preedit.content.preedit.run { preedit.isEmpty() && clientPreedit.isEmpty() }) {
+        if (clientPreeditCached.isEmpty() && inputPanelCached.preedit.isEmpty()) {
             // preedit is empty, there can be prediction candidates
             reset()
-        } else if (inputMethodEntryCached.uniqueName.let { it == "keyboard-us" || it == "unikey" }) {
+        } else if (inputMethodEntryCached.uniqueName in keepComposingIMs) {
             // androidkeyboard clears composing on reset, but we want to commit it as-is
-            service.inputConnection?.finishComposingText()
+            service.finishComposing()
             reset()
         } else {
             if (!select(0)) reset()
         }
     }
 
+    private fun showInputMethodPicker() {
+        fcitx.launchOnReady {
+            service.lifecycleScope.launch {
+                service.showDialog(InputMethodPickerDialog.build(it, service, context))
+            }
+        }
+    }
+
     val listener by lazy {
         KeyActionListener { action, _ ->
-            service.lifecycleScope.launchOnFcitxReady(fcitx) {
-                when (action) {
-                    is FcitxKeyAction -> it.sendKey(action.act, KeyState.Virtual.state)
-                    is SymAction -> it.sendKey(action.sym, action.states)
-                    is CommitAction -> {
-                        it.commitAndReset()
-                        service.inputConnection?.commitText(action.text, 1)
-                    }
-                    is QuickPhraseAction -> {
-                        it.commitAndReset()
-                        it.triggerQuickPhrase()
-                    }
-                    is UnicodeAction -> {
-                        it.commitAndReset()
-                        it.triggerUnicode()
-                    }
-                    is LangSwitchAction -> {
-                        if (it.enabledIme().size < 2) {
-                            inputView.showDialog(AddMoreInputMethodsPrompt.build(context))
-                        } else if (action.enumerate) {
-                            it.enumerateIme()
-                        } else {
-                            it.toggleIme()
+            when (action) {
+                is FcitxKeyAction -> service.postFcitxJob {
+                    sendKey(action.act, action.states.states, action.code)
+                }
+                is SymAction -> service.postFcitxJob {
+                    sendKey(action.sym, action.states)
+                }
+                is CommitAction -> service.postFcitxJob {
+                    commitAndReset()
+                    service.lifecycleScope.launch { service.commitText(action.text) }
+                }
+                is QuickPhraseAction -> service.postFcitxJob {
+                    commitAndReset()
+                    triggerQuickPhrase()
+                }
+                is UnicodeAction -> service.postFcitxJob {
+                    commitAndReset()
+                    triggerUnicode()
+                }
+                is LangSwitchAction -> {
+                    when (langSwitchKeyBehavior) {
+                        LangSwitchBehavior.Enumerate -> {
+                            service.postFcitxJob {
+                                if (enabledIme().size < 2) {
+                                    service.lifecycleScope.launch {
+                                        service.showDialog(AddMoreInputMethodsPrompt.build(context))
+                                    }
+                                } else {
+                                    enumerateIme()
+                                }
+                            }
+                        }
+                        LangSwitchBehavior.ToggleActivate -> {
+                            service.postFcitxJob {
+                                toggleIme()
+                            }
+                        }
+                        LangSwitchBehavior.NextInputMethodApp -> {
+                            service.switchToNextIME()
                         }
                     }
-                    is InputMethodSwitchAction -> {
-                        inputView.showDialog(
-                            InputMethodSwitcherDialog.build(it, service, context)
-                        )
-                    }
-                    is MoveSelectionAction -> when (backspaceSwipeState) {
-                        Stopped -> backspaceSwipeState = preedit.content.preedit.let { p ->
-                            if (p.preedit.isEmpty() && p.clientPreedit.isEmpty()) {
-                                // update state to `Selection` and apply first offset
+                }
+                is ShowInputMethodPickerAction -> showInputMethodPicker()
+                is MoveSelectionAction -> {
+                    when (backspaceSwipeState) {
+                        Stopped -> {
+                            backspaceSwipeState = if (
+                                preeditState.isEmpty &&
+                                horizontalCandidate.adapter.total <= 0 // total is -1 on initialization
+                            ) {
                                 service.applySelectionOffset(action.start, action.end)
                                 Selection
                             } else {
@@ -102,30 +150,39 @@ class CommonKeyActionListener :
                         }
                         Reset -> {}
                     }
-                    is DeleteSelectionAction -> {
-                        when (backspaceSwipeState) {
-                            Stopped -> {}
-                            Selection -> if (service.selection.isNotEmpty()) {
-                                service.inputConnection?.commitText("", 1)
-                            }
-                            Reset -> if (action.totalCnt < 0) { // swipe left
-                                it.reset()
-                            }
-                        }
-                        backspaceSwipeState = Stopped
-                    }
-                    is PickerSwitchAction -> {
-                        // update lastSymbolType only when specified explicitly
-                        val key = action.key?.also { k -> lastPickerType = k.name }
-                            ?: runCatching { PickerWindow.Key.valueOf(lastPickerType) }.getOrNull()
-                            ?: PickerWindow.Key.Emoji
-                        ContextCompat.getMainExecutor(service).execute {
-                            windowManager.attachWindow(key)
+                }
+                is DeleteSelectionAction -> {
+                    when (backspaceSwipeState) {
+                        Stopped -> {}
+                        Selection -> service.deleteSelection()
+                        Reset -> if (action.totalCnt < 0) { // swipe left
+                            service.postFcitxJob { reset() }
                         }
                     }
-                    else -> {
+                    backspaceSwipeState = Stopped
+                }
+                is PickerSwitchAction -> {
+                    // update lastSymbolType only when specified explicitly
+                    val key = action.key?.also { k -> lastPickerType = k.name }
+                        ?: runCatching { PickerWindow.Key.valueOf(lastPickerType) }.getOrNull()
+                        ?: PickerWindow.Key.Emoji
+                    ContextCompat.getMainExecutor(service).execute {
+                        windowManager.attachWindow(key)
                     }
                 }
+                is SpaceLongPressAction -> {
+                    when (spaceKeyLongPressBehavior) {
+                        SpaceLongPressBehavior.None -> {}
+                        SpaceLongPressBehavior.Enumerate -> service.postFcitxJob {
+                            enumerateIme()
+                        }
+                        SpaceLongPressBehavior.ToggleActivate -> service.postFcitxJob {
+                            toggleIme()
+                        }
+                        SpaceLongPressBehavior.ShowPicker -> showInputMethodPicker()
+                    }
+                }
+                else -> {}
             }
         }
     }

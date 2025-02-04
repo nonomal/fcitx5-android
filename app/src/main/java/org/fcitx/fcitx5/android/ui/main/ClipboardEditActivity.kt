@@ -1,17 +1,27 @@
+/*
+ * SPDX-License-Identifier: LGPL-2.1-or-later
+ * SPDX-FileCopyrightText: Copyright 2021-2023 Fcitx5 for Android Contributors
+ */
 package org.fcitx.fcitx5.android.ui.main
 
 import android.app.Activity
+import android.content.ClipData
 import android.content.Intent
 import android.os.Bundle
 import android.view.Gravity
 import android.view.inputmethod.InputMethodManager
 import android.widget.EditText
-import kotlinx.coroutines.*
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.MainScope
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.launch
 import org.fcitx.fcitx5.android.data.clipboard.ClipboardManager
 import org.fcitx.fcitx5.android.data.clipboard.db.ClipboardEntry
 import org.fcitx.fcitx5.android.databinding.ActivityClipboardEditBinding
+import org.fcitx.fcitx5.android.utils.clipboardManager
+import org.fcitx.fcitx5.android.utils.inputMethodManager
 import org.fcitx.fcitx5.android.utils.str
-import splitties.systemservices.inputMethodManager
 
 class ClipboardEditActivity : Activity() {
 
@@ -28,17 +38,20 @@ class ClipboardEditActivity : Activity() {
             editText = clipboardEditText
             clipboardEditCancel.setOnClickListener { finish() }
             clipboardEditOk.setOnClickListener { finishEditing() }
-            clipboardEditCopy.setOnClickListener { finishEditing() }
+            clipboardEditCopy.setOnClickListener { finishEditing(copy = true) }
         }
         setContentView(binding.root)
         inputMethodManager.showSoftInput(editText, InputMethodManager.SHOW_IMPLICIT)
         processIntent(intent)
     }
 
-    private fun finishEditing() {
+    private fun finishEditing(copy: Boolean = false) {
         val str = editText.str
         scope.launch(NonCancellable) {
             ClipboardManager.updateText(entryId, str)
+            if (copy) {
+                clipboardManager.setPrimaryClip(ClipData.newPlainText("", str))
+            }
         }
         finish()
     }
@@ -55,18 +68,18 @@ class ClipboardEditActivity : Activity() {
 
     private fun processIntent(intent: Intent) {
         scope.launch {
-            intent.extras?.run {
-                if (getBoolean(LAST_ENTRY)) {
+            intent.run {
+                if (getBooleanExtra(LAST_ENTRY, false)) {
                     ClipboardManager.lastEntry
                 } else {
-                    ClipboardManager.get(getInt(ENTRY_ID))
+                    ClipboardManager.get(getIntExtra(ENTRY_ID, -1))
                 }
             }?.let { setEntry(it) }
         }
     }
 
-    override fun onPause() {
-        super.onPause()
+    override fun onStop() {
+        super.onStop()
         finish()
     }
 

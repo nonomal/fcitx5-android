@@ -1,8 +1,12 @@
+/*
+ * SPDX-License-Identifier: LGPL-2.1-or-later
+ * SPDX-FileCopyrightText: Copyright 2021-2023 Fcitx5 for Android Contributors
+ */
 package org.fcitx.fcitx5.android.ui.main.settings
 
+import android.app.AlertDialog
 import android.app.NotificationChannel
 import android.app.NotificationManager
-import android.content.ContentResolver
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
@@ -11,53 +15,49 @@ import android.view.View
 import android.view.ViewGroup
 import androidx.activity.result.ActivityResultLauncher
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.appcompat.app.AlertDialog
 import androidx.core.app.NotificationCompat
 import androidx.fragment.app.Fragment
 import androidx.fragment.app.activityViewModels
 import androidx.lifecycle.lifecycleScope
-import arrow.core.getOrElse
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import org.fcitx.fcitx5.android.R
+import org.fcitx.fcitx5.android.daemon.FcitxDaemon
 import org.fcitx.fcitx5.android.data.table.TableBasedInputMethod
 import org.fcitx.fcitx5.android.data.table.TableManager
+import org.fcitx.fcitx5.android.data.table.dict.Dictionary
 import org.fcitx.fcitx5.android.ui.common.BaseDynamicListUi
 import org.fcitx.fcitx5.android.ui.common.OnItemChangedListener
 import org.fcitx.fcitx5.android.ui.main.MainViewModel
-import org.fcitx.fcitx5.android.utils.*
+import org.fcitx.fcitx5.android.utils.NaiveDustman
+import org.fcitx.fcitx5.android.utils.importErrorDialog
+import org.fcitx.fcitx5.android.utils.notificationManager
+import org.fcitx.fcitx5.android.utils.onPositiveButtonClick
+import org.fcitx.fcitx5.android.utils.positiveButton
+import org.fcitx.fcitx5.android.utils.queryFileName
+import splitties.resources.drawable
 import splitties.resources.styledDrawable
-import splitties.systemservices.notificationManager
 import splitties.views.imageDrawable
-import java.io.File
 
 class TableInputMethodFragment : Fragment(), OnItemChangedListener<TableBasedInputMethod> {
 
     private val viewModel: MainViewModel by activityViewModels()
 
-    private val entries: List<TableBasedInputMethod>
-        get() = ui.entries
-
-    private val contentResolver: ContentResolver
-        get() = requireContext().contentResolver
-
     private lateinit var zipLauncher: ActivityResultLauncher<String>
     private lateinit var confLauncher: ActivityResultLauncher<String>
     private lateinit var dictLauncher: ActivityResultLauncher<String>
+    private lateinit var replaceLauncher: ActivityResultLauncher<String>
 
     private var confUri: Uri? = null
     private var dictUri: Uri? = null
     private var filesSelectionDialog: AlertDialog? = null
+    private var tableToReplace: TableBasedInputMethod? = null
 
-    private val dustman = NaiveDustman<TableBasedInputMethod>().apply {
-        onDirty = {
-            viewModel.enableToolbarSaveButton { reloadConfig() }
-        }
-        onClean = {
-            viewModel.disableToolbarSaveButton()
-        }
-    }
+    private val dustman = NaiveDustman<TableBasedInputMethod>()
+
+    private var uiInitialized = false
 
     private val ui: BaseDynamicListUi<TableBasedInputMethod> by lazy {
         object : BaseDynamicListUi<TableBasedInputMethod>(
@@ -65,26 +65,30 @@ class TableInputMethodFragment : Fragment(), OnItemChangedListener<TableBasedInp
             Mode.Custom(),
             TableManager.inputMethods(),
             initSettingsButton = {
-                visibility = if (it.tableFileExists) View.GONE else View.VISIBLE
-                imageDrawable = styledDrawable(android.R.attr.alertDialogIcon)
-                setOnClickListener { _: View ->
-                    if (it.tableFileExists) return@setOnClickListener
+                visibility = View.VISIBLE
+                imageDrawable =
+                    if (it.tableFileExists) drawable(R.drawable.ic_baseline_edit_24)
+                    else styledDrawable(android.R.attr.alertDialogIcon)
+                setOnClickListener { _ ->
+                    tableToReplace = it
                     lifecycleScope.launch {
-                        errorDialog(
-                            requireContext(),
-                            getString(R.string.table_file_does_not_exist_title),
-                            getString(R.string.table_file_does_not_exist_message, it.tableFileName)
-                        )
+                        if (it.tableFileExists) {
+                            showReplaceTableDialog(it)
+                        } else {
+                            showMissingTableDictDialog(it)
+                        }
                     }
                 }
             }
         ) {
             init {
                 addTouchCallback()
+                shouldShowFab = true
                 fab.setOnClickListener {
                     showImportDialog()
                 }
                 enableUndo = false
+                setViewModel(viewModel)
             }
 
             override fun updateFAB() {
@@ -92,6 +96,8 @@ class TableInputMethodFragment : Fragment(), OnItemChangedListener<TableBasedInp
             }
 
             override fun showEntry(x: TableBasedInputMethod): String = x.name
+        }.also {
+            uiInitialized = true
         }
     }
 
@@ -106,17 +112,19 @@ class TableInputMethodFragment : Fragment(), OnItemChangedListener<TableBasedInp
         }
     }
 
+    override fun onCreate(savedInstanceState: Bundle?) {
+        createNotificationChannel()
+        registerLauncher()
+        super.onCreate(savedInstanceState)
+    }
+
     override fun onCreateView(
         inflater: LayoutInflater,
         container: ViewGroup?,
         savedInstanceState: Bundle?
     ): View {
-        createNotificationChannel()
-        viewModel.disableToolbarSaveButton()
-        viewModel.setToolbarTitle(getString(R.string.table_im))
-        registerLauncher()
-        ui.addOnItemChangedListener(this)
         resetDustman()
+        ui.addOnItemChangedListener(this)
         return ui.root
     }
 
@@ -127,7 +135,7 @@ class TableInputMethodFragment : Fragment(), OnItemChangedListener<TableBasedInp
                 getText(R.string.table_im),
                 NotificationManager.IMPORTANCE_HIGH
             ).apply { description = CHANNEL_ID }
-            notificationManager.createNotificationChannel(channel)
+            requireContext().notificationManager.createNotificationChannel(channel)
         }
     }
 
@@ -140,6 +148,9 @@ class TableInputMethodFragment : Fragment(), OnItemChangedListener<TableBasedInp
         }
         dictLauncher = registerForActivityResult(ActivityResultContracts.GetContent()) { uri ->
             if (uri != null) prepareDictFromUri(uri)
+        }
+        replaceLauncher = registerForActivityResult(ActivityResultContracts.GetContent()) { uri ->
+            if (uri != null) replaceDictFromUri(uri)
         }
     }
 
@@ -174,20 +185,20 @@ class TableInputMethodFragment : Fragment(), OnItemChangedListener<TableBasedInp
             .setOnDismissListener {
                 (filesSelectionUi.root.parent as? ViewGroup)?.removeView(filesSelectionUi.root)
             }
-            .show().apply {
-                getButton(AlertDialog.BUTTON_POSITIVE).apply {
-                    // override default button handler to prevent dialog close on click
-                    setOnClickListener {
-                        importConfAndDictUri()
-                    }
-                    isEnabled = false
-                }
+            .show()
+            .onPositiveButtonClick {
+                positiveButton.isEnabled = false
+                importConfAndDictUri()
+                false
+            }.apply {
+                setCanceledOnTouchOutside(false)
             }
     }
 
-    private fun updateFilesSelectionDialogButton() {
+    private fun updateFilesSelectionDialogButton(importing: Boolean = false) {
         filesSelectionDialog?.apply {
-            getButton(AlertDialog.BUTTON_POSITIVE).isEnabled = (confUri != null && dictUri != null)
+            positiveButton.isEnabled =
+                if (importing) false else (confUri != null && dictUri != null)
         }
     }
 
@@ -196,40 +207,44 @@ class TableInputMethodFragment : Fragment(), OnItemChangedListener<TableBasedInp
         filesSelectionDialog = null
     }
 
-    private fun importZipFromUri(uri: Uri) =
+    private fun importZipFromUri(uri: Uri) {
+        val ctx = requireContext()
+        val cr = ctx.contentResolver
+        val nm = ctx.notificationManager
         lifecycleScope.launch(NonCancellable + Dispatchers.IO) {
             val importId = IMPORT_ID++
-            runCatching {
-                val fileName = uri.queryFileName(contentResolver)
-                fileName.filter { it.endsWith(".zip") }.orNull()
-                    ?: errorArg(R.string.exception_table_im_filename, fileName.getOrElse { "" })
-                val file = File(fileName.orNull()!!)
-                val builder = NotificationCompat.Builder(requireContext(), CHANNEL_ID)
-                    .setSmallIcon(R.drawable.ic_baseline_library_books_24)
-                    .setContentTitle(getString(R.string.table_im))
-                    .setContentText("${getString(R.string.importing)} ${file.nameWithoutExtension}")
-                    .setOngoing(true)
-                    .setProgress(100, 0, true)
-                    .setPriority(NotificationCompat.PRIORITY_HIGH)
-                builder.build().let { notificationManager.notify(importId, it) }
-                contentResolver.openInputStream(uri)
-            }.bindOnNotNull {
-                TableManager.importFromZip(it)
-            }?.onFailure {
-                importErrorDialog(it.localizedMessage ?: it.stackTraceToString())
-            }?.onSuccess {
-                launch(Dispatchers.Main) {
-                    ui.addItem(item = it)
-                }
+            val fileName = cr.queryFileName(uri) ?: return@launch
+            if (!fileName.endsWith(".zip")) {
+                ctx.importErrorDialog(R.string.exception_table_im_filename, fileName)
+                return@launch
             }
-            notificationManager.cancel(importId)
+            NotificationCompat.Builder(ctx, CHANNEL_ID)
+                .setSmallIcon(R.drawable.ic_baseline_library_books_24)
+                .setContentTitle(getString(R.string.table_im))
+                .setContentText("${getString(R.string.importing)} $fileName")
+                .setOngoing(true)
+                .setProgress(100, 0, true)
+                .setPriority(NotificationCompat.PRIORITY_HIGH)
+                .build().let { nm.notify(importId, it) }
+            try {
+                val inputStream = cr.openInputStream(uri)!!
+                val imported = TableManager.importFromZip(inputStream).getOrThrow()
+                withContext(Dispatchers.Main) {
+                    ui.addItem(item = imported)
+                }
+            } catch (e: Exception) {
+                ctx.importErrorDialog(e)
+            }
+            nm.cancel(importId)
         }
+    }
 
     private fun prepareConfFromUri(uri: Uri) {
+        val ctx = requireContext()
         lifecycleScope.launch {
-            val fileName = uri.queryFileName(contentResolver).orNull() ?: return@launch
+            val fileName = ctx.contentResolver.queryFileName(uri) ?: ""
             if (!fileName.removeSuffix(".in").endsWith(".conf")) {
-                importErrorDialog(getString(R.string.exception_table_conf_filename, fileName))
+                ctx.importErrorDialog(R.string.exception_table_conf_filename, fileName)
                 return@launch
             }
             confUri = uri
@@ -239,10 +254,11 @@ class TableInputMethodFragment : Fragment(), OnItemChangedListener<TableBasedInp
     }
 
     private fun prepareDictFromUri(uri: Uri) {
+        val ctx = requireContext()
         lifecycleScope.launch {
-            val fileName = uri.queryFileName(contentResolver).orNull() ?: return@launch
-            if (!fileName.endsWith(".dict") && !fileName.endsWith(".txt")) {
-                importErrorDialog(getString(R.string.exception_table_dict_filename, fileName))
+            val fileName = ctx.contentResolver.queryFileName(uri) ?: ""
+            if (Dictionary.Type.fromFileName(fileName) == null) {
+                ctx.importErrorDialog(R.string.exception_table_dict_filename, fileName)
                 return@launch
             }
             dictUri = uri
@@ -252,54 +268,118 @@ class TableInputMethodFragment : Fragment(), OnItemChangedListener<TableBasedInp
     }
 
     private fun importConfAndDictUri() {
+        val ctx = requireContext()
+        val cr = ctx.contentResolver
+        val nm = ctx.notificationManager
+        val confUri = this@TableInputMethodFragment.confUri
+        val dictUri = this@TableInputMethodFragment.dictUri
+        if (confUri == null || dictUri == null) {
+            lifecycleScope.launch {
+                ctx.importErrorDialog(R.string.exception_table_import_both_files)
+            }
+            return
+        }
         lifecycleScope.launch(NonCancellable + Dispatchers.IO) {
-            if (confUri == null || dictUri == null) {
-                importErrorDialog(getString(R.string.exception_table_import_both_files))
-                return@launch
-            }
             val importId = IMPORT_ID++
-            runCatching {
-                val confName = confUri?.queryFileName(contentResolver)?.orNull() ?: return@launch
-                val dictName = dictUri?.queryFileName(contentResolver)?.orNull() ?: return@launch
-                val builder = NotificationCompat.Builder(requireContext(), CHANNEL_ID)
-                    .setSmallIcon(R.drawable.ic_baseline_library_books_24)
-                    .setContentTitle(getString(R.string.table_im))
-                    .setContentText("${getString(R.string.importing)} $confName")
-                    .setOngoing(true)
-                    .setProgress(100, 0, true)
-                    .setPriority(NotificationCompat.PRIORITY_HIGH)
-                builder.build().let { notificationManager.notify(importId, it) }
-                val confStream = contentResolver.openInputStream(confUri!!) ?: return@launch
-                val dictStream = contentResolver.openInputStream(dictUri!!) ?: return@launch
-                TableManager.importFromConfAndDict(confName, confStream, dictName, dictStream)
-                    .getOrThrow()
-            }.onFailure {
-                importErrorDialog(it.localizedMessage ?: it.stackTraceToString())
-            }.onSuccess {
-                launch(Dispatchers.Main) {
-                    dismissFilesSelectionDialog()
-                    ui.addItem(item = it)
+            val confName = cr.queryFileName(confUri) ?: return@launch
+            val dictName = cr.queryFileName(dictUri) ?: return@launch
+            NotificationCompat.Builder(ctx, CHANNEL_ID)
+                .setSmallIcon(R.drawable.ic_baseline_library_books_24)
+                .setContentTitle(getString(R.string.table_im))
+                .setContentText("${getString(R.string.importing)} $confName")
+                .setOngoing(true)
+                .setProgress(100, 0, true)
+                .setPriority(NotificationCompat.PRIORITY_HIGH)
+                .build().let { nm.notify(importId, it) }
+            try {
+                val confStream = cr.openInputStream(confUri)!!
+                val dictStream = cr.openInputStream(dictUri)!!
+                withContext(Dispatchers.Main) {
+                    updateFilesSelectionDialogButton(importing = true)
                 }
+                val imported =
+                    TableManager.importFromConfAndDict(confName, confStream, dictName, dictStream)
+                        .getOrThrow()
+                withContext(Dispatchers.Main) {
+                    dismissFilesSelectionDialog()
+                    ui.addItem(item = imported)
+                }
+            } catch (e: Exception) {
+                ctx.importErrorDialog(e)
             }
-            notificationManager.cancel(importId)
+            nm.cancel(importId)
+            withContext(Dispatchers.Main) {
+                updateFilesSelectionDialogButton(importing = false)
+            }
         }
     }
 
-    private suspend fun importErrorDialog(message: String) {
-        errorDialog(requireContext(), getString(R.string.import_error), message)
+    private fun replaceDictFromUri(uri: Uri) {
+        val ctx = requireContext()
+        val cr = ctx.contentResolver
+        val nm = ctx.notificationManager
+        val im = tableToReplace ?: return
+        tableToReplace = null
+        lifecycleScope.launch(NonCancellable + Dispatchers.IO) {
+            val importId = IMPORT_ID++
+            val dictName = cr.queryFileName(uri) ?: return@launch
+            if (Dictionary.Type.fromFileName(dictName) == null) {
+                ctx.importErrorDialog(R.string.exception_table_dict_filename, dictName)
+                return@launch
+            }
+            NotificationCompat.Builder(ctx, CHANNEL_ID)
+                .setSmallIcon(R.drawable.ic_baseline_library_books_24)
+                .setContentTitle(getString(R.string.table_im))
+                .setContentText("${getString(R.string.importing)} $dictName")
+                .setOngoing(true)
+                .setProgress(100, 0, true)
+                .setPriority(NotificationCompat.PRIORITY_HIGH)
+                .build().let { nm.notify(importId, it) }
+            try {
+                val dictStream = cr.openInputStream(uri)!!
+                im.table = TableManager.replaceTableDict(im, dictName, dictStream).getOrThrow()
+                withContext(Dispatchers.Main) {
+                    ui.updateItem(ui.indexItem(im), im)
+                }
+                dustman.forceDirty()
+            } catch (e: Exception) {
+                ctx.importErrorDialog(e)
+            }
+            nm.cancel(importId)
+        }
+    }
+
+    private fun showReplaceTableDialog(im: TableBasedInputMethod) {
+        AlertDialog.Builder(requireContext())
+            .setTitle(R.string.update_table)
+            .setMessage(getString(R.string.table_dict_replace_message, im.tableFileName))
+            .setNeutralButton(R.string.table_file_placeholder) { _, _ ->
+                replaceLauncher.launch("*/*")
+            }
+            .setNegativeButton(android.R.string.cancel, null)
+            .show()
+    }
+
+    private fun showMissingTableDictDialog(im: TableBasedInputMethod) {
+        AlertDialog.Builder(requireContext())
+            .setIconAttribute(android.R.attr.alertDialogIcon)
+            .setTitle(R.string.table_file_does_not_exist_title)
+            .setMessage(getString(R.string.table_file_does_not_exist_message, im.tableFileName))
+            .setPositiveButton(android.R.string.ok, null)
+            .setNeutralButton(R.string.table_file_placeholder) { _, _ ->
+                replaceLauncher.launch("*/*")
+            }
+            .show()
     }
 
     private fun reloadConfig() {
-        if (!dustman.dirty)
-            return
+        if (!dustman.dirty) return
         resetDustman()
-        lifecycleScope.launch {
-            viewModel.fcitx.runOnReady { reloadConfig() }
-        }
+        FcitxDaemon.restartFcitx()
     }
 
     private fun resetDustman() {
-        dustman.reset((entries.associateBy { it.name }))
+        dustman.reset(ui.entries.associateBy { it.name })
     }
 
     override fun onItemAdded(idx: Int, item: TableBasedInputMethod) {
@@ -315,9 +395,34 @@ class TableInputMethodFragment : Fragment(), OnItemChangedListener<TableBasedInp
         dustman.addOrUpdate(new.name, new)
     }
 
-    override fun onPause() {
+    override fun onItemRemovedBatch(indexed: List<Pair<Int, TableBasedInputMethod>>) {
+        batchRemove(indexed)
+    }
+
+    override fun onStart() {
+        super.onStart()
+        if (uiInitialized) {
+            viewModel.enableToolbarEditButton(ui.entries.isNotEmpty()) {
+                ui.enterMultiSelect(requireActivity().onBackPressedDispatcher)
+            }
+        }
+    }
+
+    override fun onStop() {
         reloadConfig()
-        super.onPause()
+        viewModel.disableToolbarEditButton()
+        if (uiInitialized) {
+            ui.exitMultiSelect()
+        }
+        super.onStop()
+    }
+
+    override fun onDestroy() {
+        if (uiInitialized) {
+            // prevent dustman calling viewModel after Fragment detached
+            ui.removeItemChangedListener()
+        }
+        super.onDestroy()
     }
 
     companion object {

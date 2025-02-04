@@ -1,19 +1,31 @@
+/*
+ * SPDX-License-Identifier: LGPL-2.1-or-later
+ * SPDX-FileCopyrightText: Copyright 2021-2023 Fcitx5 for Android Contributors
+ */
 package org.fcitx.fcitx5.android.data.clipboard
 
 import android.content.ClipboardManager
 import android.content.Context
+import android.os.Build
+import androidx.annotation.Keep
 import androidx.room.Room
-import kotlinx.coroutines.*
+import androidx.room.withTransaction
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
 import org.fcitx.fcitx5.android.data.clipboard.db.ClipboardDao
 import org.fcitx.fcitx5.android.data.clipboard.db.ClipboardDatabase
 import org.fcitx.fcitx5.android.data.clipboard.db.ClipboardEntry
 import org.fcitx.fcitx5.android.data.prefs.AppPrefs
 import org.fcitx.fcitx5.android.data.prefs.ManagedPreference
-import org.fcitx.fcitx5.android.utils.UTF8Utils
 import org.fcitx.fcitx5.android.utils.WeakHashSet
-import splitties.systemservices.clipboardManager
+import org.fcitx.fcitx5.android.utils.appContext
+import org.fcitx.fcitx5.android.utils.clipboardManager
+import timber.log.Timber
 
 object ClipboardManager : ClipboardManager.OnPrimaryClipChangedListener,
     CoroutineScope by CoroutineScope(SupervisorJob() + Dispatchers.Default) {
@@ -23,6 +35,8 @@ object ClipboardManager : ClipboardManager.OnPrimaryClipChangedListener,
     fun interface OnClipboardUpdateListener {
         fun onUpdate(entry: ClipboardEntry)
     }
+
+    private val clipboardManager = appContext.clipboardManager
 
     private val mutex = Mutex()
 
@@ -35,6 +49,8 @@ object ClipboardManager : ClipboardManager.OnPrimaryClipChangedListener,
 
     private val onUpdateListeners = WeakHashSet<OnClipboardUpdateListener>()
 
+    var transformer: ((String) -> String)? = null
+
     fun addOnUpdateListener(listener: OnClipboardUpdateListener) {
         onUpdateListeners.add(listener)
     }
@@ -44,6 +60,8 @@ object ClipboardManager : ClipboardManager.OnPrimaryClipChangedListener,
     }
 
     private val enabledPref = AppPrefs.getInstance().clipboard.clipboardListening
+
+    @Keep
     private val enabledListener = ManagedPreference.OnChangeListener<Boolean> { _, value ->
         if (value) {
             clipboardManager.addPrimaryClipChangedListener(this)
@@ -53,6 +71,8 @@ object ClipboardManager : ClipboardManager.OnPrimaryClipChangedListener,
     }
 
     private val limitPref = AppPrefs.getInstance().clipboard.clipboardHistoryLimit
+
+    @Keep
     private val limitListener = ManagedPreference.OnChangeListener<Int> { _, _ ->
         launch { removeOutdated() }
     }
@@ -67,6 +87,8 @@ object ClipboardManager : ClipboardManager.OnPrimaryClipChangedListener,
     fun init(context: Context) {
         clbDb = Room
             .databaseBuilder(context, ClipboardDatabase::class.java, "clbdb")
+            // allow wipe the database instead of crashing when downgrade
+            .fallbackToDestructiveMigrationOnDowngrade()
             .build()
         clbDao = clbDb.clipboardDao()
         enabledListener.onChange(enabledPref.key, enabledPref.getValue())
@@ -78,7 +100,9 @@ object ClipboardManager : ClipboardManager.OnPrimaryClipChangedListener,
 
     suspend fun get(id: Int) = clbDao.get(id)
 
-    suspend fun getAll() = clbDao.getAll()
+    suspend fun haveUnpinned() = clbDao.haveUnpinned()
+
+    fun allEntries() = clbDao.allEntries()
 
     suspend fun pin(id: Int) = clbDao.updatePinStatus(id, true)
 
@@ -92,16 +116,28 @@ object ClipboardManager : ClipboardManager.OnPrimaryClipChangedListener,
     }
 
     suspend fun delete(id: Int) {
-        clbDao.delete(id)
+        clbDao.markAsDeleted(id)
         updateItemCount()
     }
 
-    suspend fun deleteAll(skipPinned: Boolean = true) {
-        if (skipPinned)
-            clbDao.deleteAllUnpinned()
-        else
-            clbDao.deleteAll()
+    suspend fun deleteAll(skipPinned: Boolean = true): IntArray {
+        val ids = if (skipPinned) {
+            clbDao.findUnpinnedIds()
+        } else {
+            clbDao.findAllIds()
+        }
+        clbDao.markAsDeleted(*ids)
         updateItemCount()
+        return ids
+    }
+
+    suspend fun undoDelete(vararg ids: Int) {
+        clbDao.undoDelete(*ids)
+        updateItemCount()
+    }
+
+    suspend fun realDelete() {
+        clbDao.realDelete()
     }
 
     suspend fun nukeTable() {
@@ -111,38 +147,62 @@ object ClipboardManager : ClipboardManager.OnPrimaryClipChangedListener,
         }
     }
 
+    private var lastClipTimestamp = -1L
+    private var lastClipHash = 0
+
     override fun onPrimaryClipChanged() {
-        clipboardManager.primaryClip
-            ?.let { ClipboardEntry.fromClipData(it) }
-            ?.takeIf { it.text.isNotBlank() && UTF8Utils.instance.validateUTF8(it.text) }
-            ?.let { e ->
-                launch {
-                    mutex.withLock {
-                        clbDao.find(e.text)?.let {
-                            updateLastEntry(it.copy(timestamp = e.timestamp))
-                            clbDao.updateTime(it.id, e.timestamp)
-                            return@launch
-                        }
-                        val rowId = clbDao.insert(e)
-                        removeOutdated()
-                        updateItemCount()
-                        // new entry can be deleted immediately if clipboard limit == 0
-                        updateLastEntry(clbDao.get(rowId) ?: e)
+        val clip = clipboardManager.primaryClip ?: return
+        /**
+         * skip duplicate ClipData
+         * https://developer.android.com/reference/android/content/ClipboardManager.OnPrimaryClipChangedListener#onPrimaryClipChanged()
+         */
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val timestamp = clip.description.timestamp
+            if (timestamp == lastClipTimestamp) return
+            lastClipTimestamp = timestamp
+        } else {
+            val timestamp = System.currentTimeMillis()
+            val hash = clip.hashCode()
+            if (timestamp - lastClipTimestamp < 100L && hash == lastClipHash) return
+            lastClipTimestamp = timestamp
+            lastClipHash = hash
+        }
+        launch {
+            mutex.withLock {
+                val entry = ClipboardEntry.fromClipData(clip, transformer) ?: return@withLock
+                if (entry.text.isBlank()) return@withLock
+                try {
+                    clbDao.find(entry.text, entry.sensitive)?.let {
+                        updateLastEntry(it.copy(timestamp = entry.timestamp))
+                        clbDao.updateTime(it.id, entry.timestamp)
+                        return@withLock
                     }
+                    val insertedEntry = clbDb.withTransaction {
+                        val rowId = clbDao.insert(entry)
+                        removeOutdated()
+                        // new entry can be deleted immediately if clipboard limit == 0
+                        clbDao.get(rowId) ?: entry
+                    }
+                    updateLastEntry(insertedEntry)
+                    updateItemCount()
+                } catch (exception: Exception) {
+                    Timber.w("Failed to update clipboard database: $exception")
+                    updateLastEntry(entry)
                 }
             }
+        }
     }
 
     private suspend fun removeOutdated() {
         val limit = limitPref.getValue()
-        val unpinned = clbDao.getAll().filter { !it.pinned }
+        val unpinned = clbDao.getAllUnpinned()
         if (unpinned.size > limit) {
             // the last one we will keep
             val last = unpinned
                 .sortedBy { it.id }
                 .getOrNull(unpinned.size - limit)
             // delete all unpinned before that, or delete all when limit <= 0
-            clbDao.deleteUnpinnedIdLessThan(last?.timestamp ?: System.currentTimeMillis())
+            clbDao.markUnpinnedAsDeletedEarlierThan(last?.timestamp ?: System.currentTimeMillis())
         }
     }
 
